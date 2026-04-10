@@ -1,0 +1,142 @@
+# =============================================================================
+# USD Playground — Digital Twin Generation with OpenUSD & NVIDIA Omniverse
+# requirements.txt
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# NVIDIA-specific packages (omniverse-kit, isaacsim) require the NVIDIA PyPI
+# index. Add the flag below when installing those:
+#   pip install -r requirements.txt --extra-index-url https://pypi.nvidia.com
+#
+# See TECHNICAL_SPECS.md for detailed version notes, download sizes, and
+# hardware prerequisites for each dependency group.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# GROUP 1 — OpenUSD (Pixar standalone)
+# Use this for USD authoring without the full Omniverse runtime.
+# For Omniverse/Isaac Sim integration, the USD API is bundled with omniverse-kit.
+# -----------------------------------------------------------------------------
+usd-core>=24.11
+
+
+# -----------------------------------------------------------------------------
+# GROUP 2 — Deep Learning Backbone
+# PyTorch with CUDA 12.1 support is required by gsplat and 3DGRUT.
+# Install the CUDA-enabled wheel from the PyTorch index:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# The entries below are placeholders; adjust the CUDA suffix for your driver.
+# -----------------------------------------------------------------------------
+torch>=2.3.0
+torchvision>=0.18.0
+
+
+# -----------------------------------------------------------------------------
+# GROUP 3 — 3D Gaussian Splatting (gsplat)
+# GPU-accelerated differentiable rasterisation of 3D Gaussians.
+# Includes 3DGUT (Unscented Transform) for non-linear camera models.
+# Requires CUDA toolkit ≥ 12.1 to compile the CUDA extensions on first run.
+# -----------------------------------------------------------------------------
+gsplat>=1.4.0
+
+
+# -----------------------------------------------------------------------------
+# GROUP 4 — Nerfstudio
+# End-to-end NeRF / Gaussian Splat pipeline with COLMAP integration.
+# Provides ns-process-data (ffmpeg + COLMAP wrapper) and ns-train / ns-export.
+# -----------------------------------------------------------------------------
+nerfstudio>=1.1.0
+
+
+# -----------------------------------------------------------------------------
+# GROUP 5 — Image & Video Processing
+# -----------------------------------------------------------------------------
+opencv-python>=4.9.0
+imageio>=2.34.0
+imageio-ffmpeg>=0.5.0
+Pillow>=10.3.0
+
+
+# -----------------------------------------------------------------------------
+# GROUP 6 — 3D Geometry & Point Cloud Processing
+# -----------------------------------------------------------------------------
+open3d>=0.18.0
+trimesh>=4.3.0
+plyfile>=1.0.3
+numpy>=1.26.0
+scipy>=1.13.0
+
+
+# -----------------------------------------------------------------------------
+# GROUP 7 — Scientific Computing & Utilities
+# -----------------------------------------------------------------------------
+matplotlib>=3.8.0
+tqdm>=4.66.0
+rich>=13.7.0
+typer>=0.12.0
+pydantic>=2.7.0
+
+
+# -----------------------------------------------------------------------------
+# GROUP 8 — NVIDIA Omniverse Kit & Isaac Sim
+# These packages are served from https://pypi.nvidia.com — add the
+# --extra-index-url flag when installing.
+#
+# Headless / scripted Isaac Sim:
+#   pip install isaacsim --extra-index-url https://pypi.nvidia.com
+#
+# Full Omniverse Kit Python runtime:
+#   pip install omniverse-kit --extra-index-url https://pypi.nvidia.com
+#
+# Uncomment the lines below to include them in a pip install run that
+# already has --extra-index-url https://pypi.nvidia.com configured.
+# -----------------------------------------------------------------------------
+# omniverse-kit>=107.0.0
+# isaacsim>=4.5.0
+
+
+# -----------------------------------------------------------------------------
+# GROUP 9 — NVIDIA Cosmos (Reason & Transfer)
+# Hosted on HuggingFace Hub; download models with huggingface-cli.
+# Runtime dependencies listed here; model weights are downloaded separately.
+# -----------------------------------------------------------------------------
+transformers>=4.41.0
+accelerate>=0.30.0
+bitsandbytes>=0.43.0        # INT4/INT8 quantisation for Cosmos Reason on 12 GB VRAM
+huggingface-hub>=0.23.0
+sentencepiece>=0.2.0
+safetensors>=0.4.3
+
+
+# -----------------------------------------------------------------------------
+# GROUP 10 — PLY → USD Conversion Utilities
+# Adobe's USD file-format plugin provides automated PLY→USD mapping.
+# Build from source: https://github.com/adobe/USD-Fileformat-plugins
+# Runtime Python dependencies:
+# -----------------------------------------------------------------------------
+# (Adobe plugin is C++ with Python bindings — install from source)
+# Pure-Python fallback utilities:
+pyopenssl>=24.1.0           # TLS for Nucleus connections
+
+
+# -----------------------------------------------------------------------------
+# GROUP 11 — ROS 2 / Robot Description (optional, for robotic integration)
+# Install ros-humble or ros-jazzy separately via apt for full ROS 2 support.
+# Python-side utilities:
+# -----------------------------------------------------------------------------
+urdf-parser-py>=0.0.4       # Parse URDF robot descriptions
+yourdfpy>=0.0.56             # Pythonic URDF loader with visualisation
+
+
+# -----------------------------------------------------------------------------
+# GROUP 12 — Development & Testing
+# -----------------------------------------------------------------------------
+pytest>=8.2.0
+pytest-cov>=5.0.0
+black>=24.4.0
+ruff>=0.4.4
+mypy>=1.10.0
+ipython>=8.24.0
+jupyterlab>=4.2.0
