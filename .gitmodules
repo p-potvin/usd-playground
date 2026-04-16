@@ -1,0 +1,6 @@
+[submodule "vaultwares_agentciation"]
+	path = vaultwares_agentciation
+	url = https://github.com/p-potvin/vaultwares-agentciation
+[submodule "vault-themes"]
+	path = vault-themes
+	url = https://github.com/p-potvin/vault-themes
