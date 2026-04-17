@@ -7,8 +7,8 @@ if sys.stdout.encoding != 'utf-8':
 if sys.stderr.encoding != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8')
 
-# Add vaultwares-agentciation to sys.path
-sys.path.insert(0, os.path.abspath("..\\vaultwares-agentciation"))
+# Add vaultwares_agentciation to sys.path
+sys.path.insert(0, os.path.abspath("vaultwares_agentciation"))
 
 from lonely_manager import LonelyManager
 

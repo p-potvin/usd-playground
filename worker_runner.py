@@ -8,11 +8,18 @@ if sys.stdout.encoding != 'utf-8':
 if sys.stderr.encoding != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8')
 
-# Add vaultwares-agentciation to sys.path
-sys.path.insert(0, os.path.abspath("..\\vaultwares-agentciation"))
+# Add vaultwares_agentciation to sys.path
+sys.path.insert(0, os.path.abspath("vaultwares_agentciation"))
+
+import hook_registry
+print(f"DEBUG: hook_registry file: {hook_registry.__file__}")
+import inspect
+print(f"DEBUG: HookRegistry.trigger signature: {inspect.signature(hook_registry.HookRegistry.trigger)}")
 
 from agents.video_agent import VideoAgent
 from agents.text_agent import TextAgent
+from agents.reconstruction_agent import ReconstructionAgent
+from agents.omni_agent import OmniAgent
 
 def start_video_agent():
     print("Starting Video Agent...")
@@ -28,14 +35,34 @@ def start_text_agent():
     while True:
         time.sleep(1)
 
+def start_reconstruction_agent():
+    print("Starting Reconstruction Agent...")
+    agent = ReconstructionAgent(agent_id="recon-professional")
+    agent.start()
+    while True:
+        time.sleep(1)
+
+def start_omni_agent():
+    print("Starting Omni Agent...")
+    agent = OmniAgent(agent_id="omni-specialist")
+    agent.start()
+    while True:
+        time.sleep(1)
+
 if __name__ == "__main__":
     t1 = threading.Thread(target=start_video_agent, daemon=True)
     t2 = threading.Thread(target=start_text_agent, daemon=True)
+    t3 = threading.Thread(target=start_reconstruction_agent, daemon=True)
+    t4 = threading.Thread(target=start_omni_agent, daemon=True)
     
     t1.start()
     t2.start()
+    t3.start()
+    t4.start()
     
-    print("Workers are online. Press Ctrl+C to stop.")
+    print("\nReady for Digital Twin Pipeline!")
+    print("Agents online: Video, Text, Reconstruction, Omni (USD)")
+    print("Press Ctrl+C to stop.\n")
     try:
         while True:
             time.sleep(1)
