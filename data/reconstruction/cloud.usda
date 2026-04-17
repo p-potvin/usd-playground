@@ -1,0 +1,10 @@
+#usda 1.0
+(
+    upAxis = "Y"
+)
+
+def Points "Reconstruction"
+{
+    point3f[] points = [(0, 0, 0)]
+}
+

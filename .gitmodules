@@ -7,6 +7,3 @@
 [submodule "cosmos-reason2"]
 	path = cosmos-reason2
 	url = https://github.com/nvidia-cosmos/cosmos-reason2
-[submodule "cosmos-transfer2.5"]
-	path = cosmos-transfer2.5
-	url = https://github.com/nvidia-cosmos/cosmos-transfer2.5

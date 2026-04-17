@@ -1,0 +1,1 @@
+select  * from ai_models
