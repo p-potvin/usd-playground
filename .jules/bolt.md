@@ -1,0 +1,3 @@
+## 2024-05-15 - Redis Hash Performance Optimization
+**Learning:** When retrieving all values from a Redis hash where the keys are not needed (e.g., iterating through all tasks or messages in a queue), using `hgetall` and then calling `.values()` is inefficient. It forces Redis to serialize and transmit all keys over the network, and forces the Python client to construct a dictionary of those keys before discarding them.
+**Action:** Use `hvals` instead of `hgetall` when only the values are needed. This significantly reduces network payload size and saves CPU cycles locally by avoiding unnecessary dictionary construction.
