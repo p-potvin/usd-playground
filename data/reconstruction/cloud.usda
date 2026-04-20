@@ -7,4 +7,3 @@ def Points "Reconstruction"
 {
     point3f[] points = [(0, 0, 0)]
 }
-

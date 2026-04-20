@@ -1,58 +1,228 @@
 # usd-playground
-Baseline project for generating **Digital Twins** using [OpenUSD](https://openusd.org),
-[NVIDIA Omniverse](https://www.nvidia.com/en-us/omniverse/), and
-[NVIDIA Isaac Sim](https://developer.nvidia.com/isaac/sim) — with real-life footage as
-the primary data source.
 
-## Repository Contents
+`usd-playground` is an experimental OpenUSD sandbox for digital-twin ideas.
 
-| File | Description |
-|------|-------------|
-| [`REPORT.md`](REPORT.md) | Detailed research report: technologies, hardware, libraries, Isaac Sim integration (local & cloud), camera navigation, robotic systems, and Cosmos models |
-| [`requirements.txt`](requirements.txt) | Python dependencies for the full pipeline (OpenUSD, gsplat, Nerfstudio, Cosmos, Isaac Sim) |
-| [`TECHNICAL_SPECS.md`](TECHNICAL_SPECS.md) | Technical specifications: package versions, download/install sizes, CUDA requirements, storage estimates |
+If you are just trying to answer, "Does this repo work on my machine?", start with the smoke test. It is the only workflow in this repo that is currently verified end-to-end in a normal local setup, and it produces a real `.usda` file you can inspect.
+
+## What You Can Run Today
+
+- `pytest` runs the repo's supported tests.
+- The smoke test writes `data/test_outputs/smoke_scene.usda`.
+- `python usd_smoke.py` generates the same USD artifact without pytest.
 
 ## Quick Start
 
+### Windows PowerShell
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install usd-core pytest redis
+python -m pytest -s
+```
+
+### macOS / Linux
+
 ```bash
-# Create and activate a Python 3.11 environment
-conda create -n usd-twin python=3.11 -y
-conda activate usd-twin
-
-# Install COLMAP and ffmpeg (needed by Nerfstudio)
-conda install -c conda-forge colmap ffmpeg -y
-
-# Install PyTorch with CUDA 12.1
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
-# Install all Python dependencies
-pip install -r requirements.txt
-
-# For NVIDIA Omniverse / Isaac Sim (optional, requires NVIDIA developer account)
-pip install isaacsim --extra-index-url https://pypi.nvidia.com
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install usd-core pytest redis
+python -m pytest -s
 ```
 
-## Pipeline Overview
+If the test passes, you should see a line like this:
 
-```
-Video capture  →  COLMAP + gsplat / 3DGRUT  →  PLY export
-    →  OpenUSD 26.03 conversion  →  USD scene
-    →  Isaac Sim loading  →  Camera navigation + Cosmos augmentation
+```text
+Generated USD artifact: .../data/test_outputs/smoke_scene.usda
 ```
 
-See [`REPORT.md`](REPORT.md) for the complete workflow, hardware feasibility analysis,
-and integration guides.
+## Verified Test Output
 
-## Hardware Requirements
+The smoke test writes this file:
 
-- **Minimum:** NVIDIA GPU with 12 GB VRAM + RT cores (e.g. RTX 3080), 32 GB RAM, 250 GB free SSD
-- **Recommended:** RTX 4080/4090 (16–24 GB), 64 GB RAM, 500 GB NVMe SSD
-- **Cloud alternative:** AWS `g6e.2xlarge` (L40S, 48 GB) — see [`REPORT.md §4.2`](REPORT.md#42-cloud-gpus)
+- `data/test_outputs/smoke_scene.usda`
 
-## Key Technologies
+You can also generate it directly:
 
-- **3D Reconstruction:** [gsplat](https://github.com/nerfstudio-project/gsplat) + [3DGRUT](https://github.com/nv-tlabs/3dgrut) (3DGUT / 3DGRT)
-- **Scene Format:** [OpenUSD](https://openusd.org) 26.03+ with native Gaussian Splat schema
-- **Simulation:** [NVIDIA Isaac Sim](https://developer.nvidia.com/isaac/sim) 4.5 / 5.0
-- **World Models:** [NVIDIA Cosmos](https://github.com/nvidia-cosmos) Reason 2 + Transfer 2.5
-- **Capture Preprocessing:** [Nerfstudio](https://nerf.studio) + [COLMAP](https://colmap.github.io)
+```powershell
+.\.venv\Scripts\python.exe .\usd_smoke.py
+```
+
+## What `pytest` Actually Covers
+
+Default `pytest` is intentionally scoped to the tests that belong to `usd-playground` itself:
+
+- `tests/test_usd_smoke.py`
+- `vaultwares_agentciation/omx_integration/tests/`
+
+It does **not** recurse into:
+
+- `.venv/`
+- `cosmos-reason2/`
+- `vault-themes/`
+
+That is deliberate. `cosmos-reason2` is an upstream submodule with extra platform-specific dependencies and should not be treated as the default local smoke-test target for this repo.
+
+## Full Pipeline Reality Check
+
+The repo also contains an agent-driven pipeline:
+
+- `worker_runner.py`
+- `manager_runner.py`
+- `run_pipeline_demo.py`
+
+That flow is still an advanced/demo path. It depends on extra tooling such as Redis, ffmpeg, Nerfstudio/COLMAP, and the vendored `vaultwares_agentciation` framework. It is not the path I would point an everyday user to first.
+
+The smoke test is the reliable starting point because it proves all of the following with minimal setup:
+
+- OpenUSD imports correctly.
+- A USD stage can be authored locally.
+- The generated file can be reopened and validated.
+
+## Run The Demo Locally
+
+The local demo is the Redis-backed orchestration flow driven by `run_pipeline_demo.py`.
+
+It dispatches three steps:
+
+1. extract frames from `test_input.mp4`
+2. run reconstruction into `data/reconstruction`
+3. compose `data/digital_twin_scene.usda`
+
+### Prerequisites
+
+- initialize submodules first
+- use a Python environment with at least:
+  - `usd-core`
+  - `redis`
+  - `pytest`
+  - `ffmpeg` available on `PATH`
+- run a local Redis server on `localhost:6379`
+
+If you want the heavier reconstruction step to use Nerfstudio/COLMAP instead of the built-in placeholder fallback, also install those dependencies from `requirements.txt`.
+
+### One-time setup
+
+```powershell
+git submodule update --init --recursive
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install usd-core redis pytest
+```
+
+Optional heavier setup:
+
+```powershell
+.\setup_env.ps1
+```
+
+### Start Redis
+
+Use whatever local Redis workflow you prefer, but the demo expects:
+
+- host: `localhost`
+- port: `6379`
+- database: `0`
+
+### Start the demo processes
+
+Open separate terminals in the repo root.
+
+Terminal 1, start the workers:
+
+```powershell
+.\.venv\Scripts\python.exe .\worker_runner.py
+```
+
+Terminal 2, optional manager/alerts:
+
+```powershell
+.\.venv\Scripts\python.exe .\manager_runner.py
+```
+
+Terminal 3, run the orchestrator:
+
+```powershell
+.\.venv\Scripts\python.exe .\run_pipeline_demo.py
+```
+
+### Expected outputs
+
+If the demo completes, you should see:
+
+- extracted frames under `data/extracted_frames/`
+- reconstruction output under `data/reconstruction/`
+- final USD scene at `data/digital_twin_scene.usda`
+
+Important detail:
+
+- if `ns-process-data` / COLMAP is available, the reconstruction agent uses it
+- if it is missing or fails, the agent creates a placeholder `data/reconstruction/cloud.usda` so the demo can still finish and emit `data/digital_twin_scene.usda`
+
+### Optional GUI
+
+There is also a GUI entrypoint:
+
+```powershell
+.\.venv\Scripts\python.exe .\gui_app.py
+```
+
+That GUI still depends on Redis and the worker processes being available.
+
+## Single Launcher And `.exe`
+
+If you do not want separate worker, manager, and orchestrator terminals, use the single launcher:
+
+```powershell
+.\.venv\Scripts\python.exe .\demo_launcher.py
+```
+
+What it does:
+
+- runs the three demo stages in one local process
+- extracts frames from `test_input.mp4`
+- attempts Nerfstudio/COLMAP reconstruction when available
+- falls back to a placeholder reconstruction when those tools are missing
+- composes the final USD stage
+- writes outputs under `data/`
+
+For a non-UI verification run:
+
+```powershell
+.\.venv\Scripts\python.exe .\demo_launcher.py --headless
+```
+
+To build a Windows executable:
+
+```powershell
+.\build_demo_exe.ps1
+```
+
+That produces:
+
+- `dist/usd-playground-demo.exe`
+
+Notes:
+
+- when run from source, the launcher writes output under `data/demo_outputs/`
+- the packaged app writes output next to the `.exe` in its local `data/` folder
+- the packaged app includes `test_input.mp4`
+- `ffmpeg` still needs to be available on `PATH`
+- Nerfstudio/COLMAP are optional; when absent, the launcher writes a valid placeholder reconstruction and still emits the final `.usd` scene
+
+## More Detail
+
+See [TESTING.md](TESTING.md) for step-by-step testing instructions and troubleshooting.
+
+## Repository Contents
+
+| File | Purpose |
+| ------ | --------- |
+| [`usd_smoke.py`](usd_smoke.py) | Minimal USD artifact generator used by the smoke test |
+| [`tests/test_usd_smoke.py`](tests/test_usd_smoke.py) | Smoke test that creates and validates a real `.usda` file |
+| [`REPORT.md`](REPORT.md) | Research notes and architectural direction |
+| [`TECHNICAL_SPECS.md`](TECHNICAL_SPECS.md) | Detailed dependency and hardware notes |
+| [`requirements.txt`](requirements.txt) | Broad dependency list for the larger research pipeline |
