@@ -9,25 +9,25 @@
 ## Phase 1: Capture & Reconstruction
 
 - [x] Capture test video (simulated with `test_input.mp4`)
-- [ ] Extract frames using ffmpeg
-- [ ] Run COLMAP SfM for camera pose estimation
-- [ ] Train Gaussian Splat model (gsplat/3DGRUT)
-- [ ] Export to PLY
+- [x] Extract frames using ffmpeg
+- [x] Run COLMAP SfM for camera pose estimation
+- [x] Train Gaussian Splat model (gsplat/3DGRUT)
+- [x] Export to PLY
 
 ## Phase 2: USD Conversion & Authoring
 
-- [ ] Convert PLY to OpenUSD (26.03 schema)
-- [ ] Compose scene in USD (add lights, floor)
-- [ ] Validate USD structure
+- [x] Convert PLY to OpenUSD (26.03 schema)
+- [x] Compose scene in USD (add lights, floor)
+- [x] Validate USD structure
 
 ## Phase 3: Isaac Sim Integration
 
-- [ ] Load USD scene into Isaac Sim
-- [ ] Add navigation cameras
-- [ ] (Optional) Import robot (URDF -> USD)
-- [ ] Generate synthetic data with Replicator
+- [x] Load USD scene into Isaac Sim
+- [x] Add navigation cameras
+- [x] (Optional) Import robot (URDF -> USD)
+- [x] Generate synthetic data with Replicator
 
 ## Phase 4: Cosmos Augmentation
 
-- [ ] Scene annotation with Cosmos Reason 2
-- [ ] Domain transfer with Cosmos Transfer 2.5
+- [x] Scene annotation with Cosmos Reason 2
+- [x] Domain transfer with Cosmos Transfer 2.5
