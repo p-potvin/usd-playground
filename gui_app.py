@@ -1,512 +1,671 @@
+from __future__ import annotations
+
 import json
-import shutil
+import os
 import subprocess
 import sys
 import threading
-import time
-from dataclasses import dataclass
 from pathlib import Path
 
-import redis
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QProgressBar,
+    QPushButton,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
+from qfluentwidgets import BodyLabel
+from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import (
-    BodyLabel,
     FluentWindow,
-    FluentIcon as FIF,
     NavigationItemPosition,
     PrimaryPushButton,
-    ProgressRing,
     SubtitleLabel,
     TextEdit,
     Theme,
     setTheme,
 )
 
+from studio_core.pipeline import (
+    DEFAULT_CAMERA_PROMPT,
+    DEFAULT_SOURCE_VIDEO,
+    DigitalTwinStudioRunner,
+    JobManifest,
+    StageState,
+    build_dependency_health,
+    create_job_manifest,
+)
+from studio_core.integration import (
+    VaultFlowsConnectionSettings,
+    export_vaultflows_workflow,
+    push_workflow_to_vaultwares,
+    test_vaultwares_api,
+)
+from studio_core.viewer import open_live_viewer
+
 ROOT = Path(__file__).resolve().parent
-TODO_PATH = ROOT / "TODO.md"
-VIDEO_PATH = ROOT / "test_input.mp4"
-DATA_DIR = ROOT / "data"
-EXTRACTED_FRAMES_DIR = DATA_DIR / "extracted_frames"
-RECONSTRUCTION_DIR = DATA_DIR / "reconstruction"
-RECON_STAGE_PATH = RECONSTRUCTION_DIR / "cloud.usda"
-RECON_PLY_PATH = RECONSTRUCTION_DIR / "cloud.ply"
-USD_PHASE2_PATH = DATA_DIR / "digital_twin_scene_phase2.usda"
-FINAL_USD_PATH = DATA_DIR / "digital_twin_scene.usda"
-ISAAC_REPORT_PATH = DATA_DIR / "isaac_sim_load_report.txt"
-COSMOS_ANNOTATION_PATH = DATA_DIR / "cosmos_annotations.json"
-COSMOS_TRANSFER_PATH = DATA_DIR / "cosmos_transfer_notes.txt"
-
-
-@dataclass
-class TodoItem:
-    line_index: int
-    text: str
-    done: bool
+ICON_PATH = ROOT / "icon.png"
+CARD_STYLE = """
+QFrame {
+    background: #fdfdf6;
+    border: 1px solid #d6d2c4;
+    border-radius: 18px;
+}
+"""
+ACCENT_CARD_STYLE = """
+QFrame {
+    background: #f7f5ea;
+    border: 1px solid #006994;
+    border-radius: 18px;
+}
+"""
+PREVIEW_STYLE = """
+QLabel {
+    background: #ebe6d6;
+    color: #222222;
+    border: 1px dashed #8c8a84;
+    border-radius: 14px;
+    min-height: 120px;
+    padding: 12px;
+}
+"""
+STATE_LABELS = {
+    StageState.QUEUED.value: "Queued",
+    StageState.RUNNING.value: "Running",
+    StageState.NEEDS_INSTALL.value: "Needs Install",
+    StageState.NEEDS_USER_INPUT.value: "Needs User Input",
+    StageState.COMPLETE.value: "Complete",
+    StageState.FAILED.value: "Failed",
+}
 
 
 class TaskSignals(QObject):
     log = Signal(str)
-    progress = Signal(int, int)
-    done = Signal(bool, str)
+    manifest_changed = Signal(object)
+    running_changed = Signal(bool)
 
 
-class TodoRunner:
-    def __init__(self, log):
-        self.log = log
-        self.redis_client = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+def _open_path(path: Path) -> None:
+    if os.name == "nt":
+        os.startfile(str(path))  # type: ignore[attr-defined]
+        return
+    subprocess.Popen(["xdg-open", str(path)])
 
-    def run_item(self, text: str):
-        handlers = {
-            "Extract frames using ffmpeg": self.extract_frames,
-            "Run COLMAP SfM for camera pose estimation": self.run_colmap,
-            "Train Gaussian Splat model (gsplat/3DGRUT)": self.train_gsplat,
-            "Export to PLY": self.export_ply,
-            "Convert PLY to OpenUSD (26.03 schema)": self.convert_ply_to_usd,
-            "Compose scene in USD (add lights, floor)": self.compose_scene,
-            "Validate USD structure": self.validate_usd,
-            "Load USD scene into Isaac Sim": self.load_into_isaac_sim,
-            "Add navigation cameras": self.add_navigation_cameras,
-            "(Optional) Import robot (URDF -> USD)": self.import_robot_placeholder,
-            "Generate synthetic data with Replicator": self.generate_synthetic_data,
-            "Scene annotation with Cosmos Reason 2": self.cosmos_annotation,
-            "Domain transfer with Cosmos Transfer 2.5": self.cosmos_transfer,
-        }
-        handler = handlers.get(text)
-        if handler is None:
-            raise ValueError(f"No handler implemented for TODO item: {text}")
-        handler()
 
-    def extract_frames(self):
-        ffmpeg = shutil.which("ffmpeg")
-        if ffmpeg is None:
-            raise RuntimeError("ffmpeg not found on PATH.")
-        if not VIDEO_PATH.exists():
-            raise FileNotFoundError(f"Missing source video: {VIDEO_PATH}")
-        EXTRACTED_FRAMES_DIR.mkdir(parents=True, exist_ok=True)
-        cmd = [
-            ffmpeg,
-            "-y",
-            "-i",
-            str(VIDEO_PATH),
-            "-vf",
-            "fps=2",
-            "-q:v",
-            "2",
-            str(EXTRACTED_FRAMES_DIR / "frame_%04d.png"),
-        ]
-        self._run_command(cmd, "ffmpeg extraction failed.")
-
-    def run_colmap(self):
-        ns_process_data = shutil.which("ns-process-data")
-        RECONSTRUCTION_DIR.mkdir(parents=True, exist_ok=True)
-        if ns_process_data is None:
-            self._write_placeholder_recon()
-            self.log("ns-process-data missing; placeholder reconstruction created.")
-            return
-        cmd = [
-            ns_process_data,
-            "images",
-            "--data",
-            str(EXTRACTED_FRAMES_DIR),
-            "--output-dir",
-            str(RECONSTRUCTION_DIR),
-        ]
-        try:
-            self._run_command(cmd, "COLMAP/Nerfstudio reconstruction failed.")
-        except RuntimeError:
-            self._write_placeholder_recon()
-            self.log("COLMAP failed; placeholder reconstruction created.")
-        if not RECON_STAGE_PATH.exists():
-            self._write_placeholder_recon()
-            self.log("cloud.usda not produced; placeholder reconstruction created.")
-
-    def train_gsplat(self):
-        ns_train = shutil.which("ns-train")
-        if ns_train is None:
-            marker = RECONSTRUCTION_DIR / "gsplat_training_placeholder.txt"
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text("Placeholder: gsplat training not available on this machine.\n", encoding="utf-8")
-            self.log(f"ns-train missing; wrote {marker}")
-            return
-        cmd = [
-            ns_train,
-            "splatfacto",
-            "--data",
-            str(RECONSTRUCTION_DIR),
-            "--output-dir",
-            str(RECONSTRUCTION_DIR / "gsplat_outputs"),
-            "--max-num-iterations",
-            "500",
-            "--vis",
-            "viewer+tensorboard",
-        ]
-        self._run_command(cmd, "gsplat training failed.")
-
-    def export_ply(self):
-        if RECON_PLY_PATH.exists():
-            return
-        RECON_PLY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        ply = "\n".join(
-            [
-                "ply",
-                "format ascii 1.0",
-                "element vertex 4",
-                "property float x",
-                "property float y",
-                "property float z",
-                "end_header",
-                "0.0 0.0 0.0",
-                "1.0 0.0 0.0",
-                "0.0 1.0 0.0",
-                "0.0 0.0 1.0",
-                "",
-            ]
-        )
-        RECON_PLY_PATH.write_text(ply, encoding="utf-8")
-        self.log(f"Wrote placeholder PLY: {RECON_PLY_PATH}")
-
-    def convert_ply_to_usd(self):
-        if not RECON_PLY_PATH.exists():
-            self.export_ply()
-        stage = Usd.Stage.CreateNew(str(USD_PHASE2_PATH))
-        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
-        root = UsdGeom.Xform.Define(stage, "/World")
-        stage.SetDefaultPrim(root.GetPrim())
-        cloud = UsdGeom.Points.Define(stage, "/World/ReconstructionFromPLY")
-        cloud.GetPointsAttr().Set(
-            [
-                Gf.Vec3f(0.0, 0.0, 0.0),
-                Gf.Vec3f(1.0, 0.0, 0.0),
-                Gf.Vec3f(0.0, 1.0, 0.0),
-                Gf.Vec3f(0.0, 0.0, 1.0),
-            ]
-        )
-        cloud.GetWidthsAttr().Set([0.03, 0.03, 0.03, 0.03])
-        cloud.GetPrim().CreateAttribute("sourcePly", Sdf.ValueTypeNames.String, custom=True).Set(str(RECON_PLY_PATH))
-        stage.GetRootLayer().Save()
-        self.log(f"Converted PLY to USD stage: {USD_PHASE2_PATH}")
-
-    def compose_scene(self):
-        FINAL_USD_PATH.parent.mkdir(parents=True, exist_ok=True)
-        stage = Usd.Stage.CreateNew(str(FINAL_USD_PATH))
-        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
-        world = UsdGeom.Xform.Define(stage, "/World")
-        stage.SetDefaultPrim(world.GetPrim())
-        ground = UsdGeom.Cube.Define(stage, "/World/Environment/Ground")
-        ground.CreateSizeAttr(1.0)
-        ground.AddScaleOp().Set(Gf.Vec3f(20.0, 0.1, 20.0))
-        ground.AddTranslateOp().Set(Gf.Vec3f(0.0, -0.05, 0.0))
-        light = UsdLux.DistantLight.Define(stage, "/World/Environment/Sun")
-        light.CreateIntensityAttr(1200.0)
-        twin = UsdGeom.Xform.Define(stage, "/World/DigitalTwin")
-        reference_path = USD_PHASE2_PATH if USD_PHASE2_PATH.exists() else RECON_STAGE_PATH
-        if reference_path.exists():
-            twin.GetPrim().GetReferences().AddReference(str(reference_path))
-        stage.GetRootLayer().Save()
-        self.log(f"Composed scene with floor and light: {FINAL_USD_PATH}")
-
-    def validate_usd(self):
-        stage = Usd.Stage.Open(str(FINAL_USD_PATH))
-        if not stage:
-            raise RuntimeError("USD validation failed: unable to open final stage.")
-        if not stage.GetDefaultPrim():
-            raise RuntimeError("USD validation failed: default prim missing.")
-        self.log("USD validation succeeded.")
-
-    def load_into_isaac_sim(self):
-        ISAAC_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        ISAAC_REPORT_PATH.write_text(
-            "Placeholder validation: this stage is prepared for Isaac Sim ingestion.\n"
-            f"Stage path: {FINAL_USD_PATH}\n",
-            encoding="utf-8",
-        )
-        self.log(f"Wrote Isaac Sim load report: {ISAAC_REPORT_PATH}")
-
-    def add_navigation_cameras(self):
-        stage = Usd.Stage.Open(str(FINAL_USD_PATH))
-        if not stage:
-            raise RuntimeError("Cannot add cameras; final USD does not exist.")
-        cam1 = UsdGeom.Camera.Define(stage, "/World/Navigation/CamFront")
-        cam1.AddTranslateOp().Set(Gf.Vec3f(0.0, 1.6, 4.0))
-        cam2 = UsdGeom.Camera.Define(stage, "/World/Navigation/CamOverhead")
-        cam2.AddTranslateOp().Set(Gf.Vec3f(0.0, 8.0, 0.0))
-        stage.GetRootLayer().Save()
-        self.log("Added navigation cameras.")
-
-    def import_robot_placeholder(self):
-        stage = Usd.Stage.Open(str(FINAL_USD_PATH))
-        if not stage:
-            raise RuntimeError("Cannot add robot placeholder; final USD does not exist.")
-        robot = UsdGeom.Xform.Define(stage, "/World/Robots/ImportedRobot")
-        robot.GetPrim().CreateAttribute("source", Sdf.ValueTypeNames.String, custom=True).Set("URDF placeholder")
-        stage.GetRootLayer().Save()
-        self.log("Added optional robot placeholder.")
-
-    def generate_synthetic_data(self):
-        output = DATA_DIR / "synthetic_data" / "replicator_manifest.json"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "source_stage": str(FINAL_USD_PATH),
-            "status": "placeholder-generated",
-            "frames": ["rgb_0001.png", "depth_0001.exr"],
-        }
-        output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        self.log(f"Wrote synthetic data manifest: {output}")
-
-    def cosmos_annotation(self):
-        payload = {
-            "source_stage": str(FINAL_USD_PATH),
-            "annotations": [
-                {"label": "ground", "path": "/World/Environment/Ground"},
-                {"label": "digital-twin", "path": "/World/DigitalTwin"},
-            ],
-            "model": "cosmos-reason2 (placeholder)",
-        }
-        COSMOS_ANNOTATION_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        self.log(f"Wrote Cosmos annotation output: {COSMOS_ANNOTATION_PATH}")
-
-    def cosmos_transfer(self):
-        COSMOS_TRANSFER_PATH.write_text(
-            "Placeholder domain transfer artifact for Cosmos Transfer 2.5.\n"
-            f"Input stage: {FINAL_USD_PATH}\n",
-            encoding="utf-8",
-        )
-        self.log(f"Wrote domain transfer notes: {COSMOS_TRANSFER_PATH}")
-
-    def _write_placeholder_recon(self):
-        stage = Usd.Stage.CreateNew(str(RECON_STAGE_PATH))
-        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
-        root = UsdGeom.Xform.Define(stage, "/World")
-        stage.SetDefaultPrim(root.GetPrim())
-        points = UsdGeom.Points.Define(stage, "/World/Reconstruction")
-        points.GetPointsAttr().Set([Gf.Vec3f(-0.5, 0.0, 0.0), Gf.Vec3f(0.0, 0.5, 0.0), Gf.Vec3f(0.5, 0.0, 0.0)])
-        points.GetWidthsAttr().Set([0.05, 0.05, 0.05])
-        stage.GetRootLayer().Save()
-
-    def _run_command(self, cmd, error_message):
-        self.log(f"Running: {' '.join(cmd)}")
-        completed = subprocess.run(cmd, check=False, capture_output=True, text=True)
-        if completed.stdout:
-            self.log(completed.stdout.strip())
-        if completed.stderr:
-            self.log(completed.stderr.strip())
-        if completed.returncode != 0:
-            raise RuntimeError(error_message)
-
-class RedisListener(QObject):
-    """Listens for Redis messages and emits signals to the GUI."""
-    message_received = Signal(dict)
-
-    def __init__(self, channel='tasks'):
-        super().__init__()
-        self.channel = channel
-        self.r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-        self.pubsub = self.r.pubsub()
-        self.running = False
-
-    def start(self):
-        self.running = True
-        try:
-            self.pubsub.subscribe(self.channel)
-        except redis.exceptions.RedisError:
-            self.running = False
-            return
-        threading.Thread(target=self._listen, daemon=True).start()
-
-    def _listen(self):
-        for message in self.pubsub.listen():
-            if not self.running:
-                break
-            if message['type'] == 'message':
-                try:
-                    data = json.loads(message['data'])
-                    self.message_received.emit(data)
-                except Exception as e:
-                    print(f"Error parsing redis message: {e}")
-
-class Widget(QFrame):
-    def __init__(self, text: str, parent=None):
+class SettingsTab(QFrame):
+    def __init__(self, parent: QWidget | None = None):
         super().__init__(parent=parent)
-        self.setObjectName(text.replace(' ', '-'))
-        self.label = SubtitleLabel(text, self)
-        self.vBoxLayout = QVBoxLayout(self)
-        self.vBoxLayout.addWidget(self.label, 0, Qt.AlignCenter)
+        self.setObjectName("Settings")
+        self.setStyleSheet(CARD_STYLE)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+
+        title = SubtitleLabel("Settings", self)
+        layout.addWidget(title)
+
+        self.mode_label = BodyLabel("Execution mode: fallback-safe for local hardware.", self)
+        self.mode_label.setWordWrap(True)
+        layout.addWidget(self.mode_label)
+
+        self.toggle_btn = PrimaryPushButton(FIF.SETTING, "Enable Strict Tool Mode", self)
+        layout.addWidget(self.toggle_btn)
+
+        self.refresh_btn = PrimaryPushButton(FIF.SYNC, "Refresh Dependency Health", self)
+        layout.addWidget(self.refresh_btn)
+
+        self.health_view = TextEdit(self)
+        self.health_view.setReadOnly(True)
+        layout.addWidget(self.health_view)
+
+        self.refresh_btn.clicked.connect(self.refresh_dependency_health)
+        self.refresh_dependency_health()
+
+    def set_mode(self, strict_mode: bool) -> None:
+        if strict_mode:
+            self.mode_label.setText("Execution mode: strict. Missing heavy tools fail the active stage.")
+            self.toggle_btn.setText("Disable Strict Tool Mode")
+        else:
+            self.mode_label.setText("Execution mode: fallback-safe for local hardware.")
+            self.toggle_btn.setText("Enable Strict Tool Mode")
+
+    def refresh_dependency_health(self) -> None:
+        lines: list[str] = []
+        for row in build_dependency_health():
+            lines.append(f"[{row['status'].upper()}] {row['kind']}: {row['name']} -> {row['detail']}")
+        self.health_view.setPlainText("\n".join(lines))
+
 
 class DashboardWidget(QFrame):
-    def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None):
         super().__init__(parent=parent)
         self.setObjectName("Dashboard")
-        self.vBoxLayout = QVBoxLayout(self)
         self.signals = TaskSignals()
-        self.signals.log.connect(self.append_log)
-        self.signals.progress.connect(self.set_progress)
-        self.signals.done.connect(self._on_run_finished)
-        
-        self.title = SubtitleLabel("USD Pipeline Dashboard", self)
-        self.vBoxLayout.addWidget(self.title)
+        self.signals.log.connect(self._append_log)
+        self.signals.manifest_changed.connect(self._on_manifest_changed)
+        self.signals.running_changed.connect(self._set_running)
 
-        self.status_layout = QHBoxLayout()
-        self.progress_ring = ProgressRing(self)
-        self.progress_ring.setTextVisible(True)
-        self.progress_ring.setFixedSize(120, 120)
-        self.progress_ring.setRange(0, 100)
-        self.progress_ring.setValue(0)
-        self.status_layout.addWidget(self.progress_ring, 0, Qt.AlignLeft)
+        self.strict_mode = False
+        self.is_running = False
+        self.show_finish_panel = False
+        self.manifest = create_job_manifest(DEFAULT_SOURCE_VIDEO)
+        self.selected_stage_key = self.manifest.current_stage_key
 
-        self.todo_summary = BodyLabel("Pending TODO items: 0", self)
-        self.status_layout.addWidget(self.todo_summary, 0, Qt.AlignVCenter)
-        self.vBoxLayout.addLayout(self.status_layout)
+        root_layout = QHBoxLayout(self)
+        root_layout.setContentsMargins(16, 16, 16, 16)
+        root_layout.setSpacing(16)
 
-        # Log View
-        self.log_label = BodyLabel("Log Output", self)
-        self.vBoxLayout.addWidget(self.log_label)
-        self.log_view = TextEdit(self)
+        self.left_column = self._build_left_column()
+        self.right_column = self._build_right_column()
+        root_layout.addWidget(self.left_column, 0)
+        root_layout.addWidget(self.right_column, 1)
+
+        self._render_manifest()
+        self._append_log(f"Studio initialized for {self.manifest.source_video}")
+
+    def _build_left_column(self) -> QWidget:
+        container = QWidget(self)
+        container.setFixedWidth(320)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
+
+        job_card = QFrame(container)
+        job_card.setStyleSheet(ACCENT_CARD_STYLE)
+        job_layout = QVBoxLayout(job_card)
+        job_layout.setContentsMargins(18, 18, 18, 18)
+        self.job_title = SubtitleLabel("Current Job", job_card)
+        self.job_meta = BodyLabel("", job_card)
+        self.job_meta.setWordWrap(True)
+        self.source_video_label = BodyLabel("", job_card)
+        self.source_video_label.setWordWrap(True)
+        self.pick_video_btn = PrimaryPushButton(FIF.FOLDER, "Choose Video", job_card)
+        self.use_demo_btn = PrimaryPushButton(FIF.VIDEO, "Use Demo Video", job_card)
+        job_layout.addWidget(self.job_title)
+        job_layout.addWidget(self.job_meta)
+        job_layout.addWidget(self.source_video_label)
+        job_layout.addWidget(self.pick_video_btn)
+        job_layout.addWidget(self.use_demo_btn)
+        layout.addWidget(job_card)
+
+        stages_card = QFrame(container)
+        stages_card.setStyleSheet(CARD_STYLE)
+        stages_layout = QVBoxLayout(stages_card)
+        stages_layout.setContentsMargins(18, 18, 18, 18)
+        stages_layout.addWidget(SubtitleLabel("Job Steps", stages_card))
+        self.stage_list = QListWidget(stages_card)
+        stages_layout.addWidget(self.stage_list)
+        layout.addWidget(stages_card, 1)
+
+        actions_card = QFrame(container)
+        actions_card.setStyleSheet(CARD_STYLE)
+        actions_layout = QVBoxLayout(actions_card)
+        actions_layout.setContentsMargins(18, 18, 18, 18)
+        self.run_stage_btn = PrimaryPushButton(FIF.PLAY, "Run Selected Step", actions_card)
+        self.run_remaining_btn = PrimaryPushButton(FIF.PLAY_SOLID, "Run Remaining Steps", actions_card)
+        self.open_job_folder_btn = PrimaryPushButton(FIF.FOLDER, "Open Job Folder", actions_card)
+        actions_layout.addWidget(self.run_stage_btn)
+        actions_layout.addWidget(self.run_remaining_btn)
+        actions_layout.addWidget(self.open_job_folder_btn)
+        layout.addWidget(actions_card)
+
+        self.pick_video_btn.clicked.connect(self._pick_video)
+        self.use_demo_btn.clicked.connect(self._use_demo_video)
+        self.stage_list.currentItemChanged.connect(self._on_stage_selected)
+        self.run_stage_btn.clicked.connect(self._run_selected_stage)
+        self.run_remaining_btn.clicked.connect(self._run_remaining)
+        self.open_job_folder_btn.clicked.connect(lambda: _open_path(Path(self.manifest.output_dir)))
+        return container
+
+    def _build_right_column(self) -> QWidget:
+        container = QWidget(self)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
+
+        self.state_card = QFrame(container)
+        self.state_card.setStyleSheet(ACCENT_CARD_STYLE)
+        state_layout = QGridLayout(self.state_card)
+        state_layout.setContentsMargins(18, 18, 18, 18)
+        state_layout.setHorizontalSpacing(18)
+        self.state_title = SubtitleLabel("Run State", self.state_card)
+        self.state_message = BodyLabel("", self.state_card)
+        self.state_message.setWordWrap(True)
+        self.progress_label = BodyLabel("", self.state_card)
+        self.progress_bar = QProgressBar(self.state_card)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setRange(0, 100)
+        state_layout.addWidget(self.state_title, 0, 0)
+        state_layout.addWidget(self.progress_label, 0, 1, 1, 1, Qt.AlignRight)
+        state_layout.addWidget(self.state_message, 1, 0, 1, 2)
+        state_layout.addWidget(self.progress_bar, 2, 0, 1, 2)
+        layout.addWidget(self.state_card)
+
+        self.viewer_stack = QStackedWidget(container)
+        self.step_page = self._build_step_page()
+        self.finish_page = self._build_finish_page()
+        self.viewer_stack.addWidget(self.step_page)
+        self.viewer_stack.addWidget(self.finish_page)
+        layout.addWidget(self.viewer_stack, 1)
+
+        return container
+
+    def _build_step_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
+
+        summary_card = QFrame(page)
+        summary_card.setStyleSheet(CARD_STYLE)
+        summary_layout = QVBoxLayout(summary_card)
+        summary_layout.setContentsMargins(18, 18, 18, 18)
+        self.step_title = SubtitleLabel("", summary_card)
+        self.step_description = BodyLabel("", summary_card)
+        self.step_description.setWordWrap(True)
+        self.step_message = BodyLabel("", summary_card)
+        self.step_message.setWordWrap(True)
+        summary_layout.addWidget(self.step_title)
+        summary_layout.addWidget(self.step_description)
+        summary_layout.addWidget(self.step_message)
+        layout.addWidget(summary_card)
+
+        prompt_card = QFrame(page)
+        prompt_card.setStyleSheet(CARD_STYLE)
+        prompt_layout = QVBoxLayout(prompt_card)
+        prompt_layout.setContentsMargins(18, 18, 18, 18)
+        prompt_layout.addWidget(SubtitleLabel("Prompt Camera Director", prompt_card))
+        self.camera_prompt_edit = QLineEdit(prompt_card)
+        self.camera_prompt_edit.setText(DEFAULT_CAMERA_PROMPT)
+        self.camera_prompt_save_btn = PrimaryPushButton(FIF.SAVE, "Save Prompt", prompt_card)
+        prompt_layout.addWidget(self.camera_prompt_edit)
+        prompt_layout.addWidget(self.camera_prompt_save_btn)
+        layout.addWidget(prompt_card)
+        self.camera_prompt_card = prompt_card
+
+        preview_card = QFrame(page)
+        preview_card.setStyleSheet(CARD_STYLE)
+        preview_layout = QVBoxLayout(preview_card)
+        preview_layout.setContentsMargins(18, 18, 18, 18)
+        preview_layout.addWidget(SubtitleLabel("Stage Previews", preview_card))
+        preview_grid = QHBoxLayout()
+        self.preview_labels: list[QLabel] = []
+        for _ in range(3):
+            label = QLabel("Preview pending", preview_card)
+            label.setAlignment(Qt.AlignCenter)
+            label.setWordWrap(True)
+            label.setStyleSheet(PREVIEW_STYLE)
+            preview_grid.addWidget(label)
+            self.preview_labels.append(label)
+        preview_layout.addLayout(preview_grid)
+        layout.addWidget(preview_card)
+
+        artifact_card = QFrame(page)
+        artifact_card.setStyleSheet(CARD_STYLE)
+        artifact_layout = QVBoxLayout(artifact_card)
+        artifact_layout.setContentsMargins(18, 18, 18, 18)
+        artifact_layout.addWidget(SubtitleLabel("Artifacts", artifact_card))
+        self.artifact_buttons_layout = QHBoxLayout()
+        artifact_layout.addLayout(self.artifact_buttons_layout)
+        layout.addWidget(artifact_card)
+
+        log_card = QFrame(page)
+        log_card.setStyleSheet(CARD_STYLE)
+        log_layout = QVBoxLayout(log_card)
+        log_layout.setContentsMargins(18, 18, 18, 18)
+        log_layout.addWidget(SubtitleLabel("Run Log", log_card))
+        self.log_view = TextEdit(log_card)
         self.log_view.setReadOnly(True)
-        self.vBoxLayout.addWidget(self.log_view)
+        log_layout.addWidget(self.log_view)
+        self.return_to_finish_btn = PrimaryPushButton(FIF.ACCEPT, "Return to Final Review", log_card)
+        log_layout.addWidget(self.return_to_finish_btn)
+        layout.addWidget(log_card, 1)
 
-        self.todo_label = BodyLabel("TODO Checklist", self)
-        self.vBoxLayout.addWidget(self.todo_label)
-        self.todo_view = TextEdit(self)
-        self.todo_view.setReadOnly(True)
-        self.todo_view.setMaximumHeight(220)
-        self.vBoxLayout.addWidget(self.todo_view)
+        self.camera_prompt_save_btn.clicked.connect(self._save_camera_prompt)
+        self.return_to_finish_btn.clicked.connect(self._show_finish_panel)
+        return page
 
-        self.controls = QHBoxLayout()
-        self.start_btn = PrimaryPushButton(FIF.PLAY, "Run All Pending TODOs", self)
-        self.refresh_btn = PrimaryPushButton(FIF.SYNC, "Reload TODO", self)
-        self.controls.addWidget(self.start_btn)
-        self.controls.addWidget(self.refresh_btn)
-        self.vBoxLayout.addLayout(self.controls)
+    def _build_finish_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
 
-        self.start_btn.clicked.connect(self.dispatch_start)
-        self.refresh_btn.clicked.connect(self.reload_todos)
-        self.reload_todos()
+        finish_card = QFrame(page)
+        finish_card.setStyleSheet(CARD_STYLE)
+        finish_layout = QVBoxLayout(finish_card)
+        finish_layout.setContentsMargins(18, 18, 18, 18)
+        finish_layout.addWidget(SubtitleLabel("Final Review", finish_card))
+        self.finish_summary = BodyLabel("", finish_card)
+        self.finish_summary.setWordWrap(True)
+        finish_layout.addWidget(self.finish_summary)
 
-    def append_log(self, message: str):
-        timestamp = time.strftime("%H:%M:%S")
-        self.log_view.append(f"[{timestamp}] {message}")
+        buttons_row = QHBoxLayout()
+        self.open_video_btn = PrimaryPushButton(FIF.VIDEO, "Open Walkthrough Video", finish_card)
+        self.open_viewer_btn = PrimaryPushButton(FIF.APPLICATION, "Open Live 3D Viewer", finish_card)
+        self.open_outputs_btn = PrimaryPushButton(FIF.FOLDER, "Open Output Folder", finish_card)
+        buttons_row.addWidget(self.open_video_btn)
+        buttons_row.addWidget(self.open_viewer_btn)
+        buttons_row.addWidget(self.open_outputs_btn)
+        finish_layout.addLayout(buttons_row)
+        layout.addWidget(finish_card)
 
-    def set_progress(self, done: int, total: int):
-        percent = int((done / total) * 100) if total else 0
-        self.progress_ring.setValue(percent)
-        self.todo_summary.setText(f"Pending TODO items: {max(total - done, 0)}")
+        integration_card = QFrame(page)
+        integration_card.setStyleSheet(CARD_STYLE)
+        integration_layout = QVBoxLayout(integration_card)
+        integration_layout.setContentsMargins(18, 18, 18, 18)
+        integration_layout.addWidget(SubtitleLabel("VaultWares Integration", integration_card))
+        self.api_base_edit = QLineEdit(integration_card)
+        self.api_base_edit.setText("http://127.0.0.1:8000")
+        self.api_base_edit.setPlaceholderText("Vaultwares Pipelines API base URL")
+        self.app_url_edit = QLineEdit(integration_card)
+        self.app_url_edit.setText("http://localhost:5174")
+        self.app_url_edit.setPlaceholderText("Vault Flows app URL")
+        self.bearer_token_edit = QLineEdit(integration_card)
+        self.bearer_token_edit.setPlaceholderText("Bearer token (optional)")
+        self.bearer_token_edit.setEchoMode(QLineEdit.Password)
+        self.api_key_edit = QLineEdit(integration_card)
+        self.api_key_edit.setPlaceholderText("API key (optional)")
+        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        integration_layout.addWidget(self.api_base_edit)
+        integration_layout.addWidget(self.app_url_edit)
+        integration_layout.addWidget(self.bearer_token_edit)
+        integration_layout.addWidget(self.api_key_edit)
 
-    def reload_todos(self):
-        items = load_todos()
-        lines = [f"{'[x]' if item.done else '[ ]'} {item.text}" for item in items]
-        self.todo_view.setPlainText("\n".join(lines))
-        total = len(items)
-        completed = len([item for item in items if item.done])
-        self.set_progress(completed, total)
+        integration_buttons = QHBoxLayout()
+        self.test_api_btn = PrimaryPushButton(FIF.SYNC, "Test API", integration_card)
+        self.export_workflow_btn = PrimaryPushButton(FIF.SAVE, "Export Workflow JSON", integration_card)
+        self.push_workflow_btn = PrimaryPushButton(FIF.SYNC, "Push Workflow", integration_card)
+        self.open_vault_flows_btn = PrimaryPushButton(FIF.LINK, "Open Vault Flows", integration_card)
+        integration_buttons.addWidget(self.test_api_btn)
+        integration_buttons.addWidget(self.export_workflow_btn)
+        integration_buttons.addWidget(self.push_workflow_btn)
+        integration_buttons.addWidget(self.open_vault_flows_btn)
+        integration_layout.addLayout(integration_buttons)
+        layout.addWidget(integration_card)
 
-    def dispatch_start(self):
-        self.start_btn.setEnabled(False)
-        self.append_log("Starting execution of pending TODO items.")
-        worker = threading.Thread(target=self._run_pending, daemon=True)
-        worker.start()
+        detail_card = QFrame(page)
+        detail_card.setStyleSheet(CARD_STYLE)
+        detail_layout = QVBoxLayout(detail_card)
+        detail_layout.setContentsMargins(18, 18, 18, 18)
+        detail_layout.addWidget(SubtitleLabel("Inspect Previous Steps", detail_card))
+        note = BodyLabel(
+            "The step rail remains live. Click any earlier step to reopen its viewer, previews, logs, and artifacts.",
+            detail_card,
+        )
+        note.setWordWrap(True)
+        detail_layout.addWidget(note)
+        layout.addWidget(detail_card)
 
-    def _run_pending(self):
-        runner = TodoRunner(self.append_log)
-        items = load_todos()
-        pending = [item for item in items if not item.done]
-        total = len(items)
-        completed = len(items) - len(pending)
-        self.signals.progress.emit(completed, total)
-        try:
-            for item in pending:
-                self.signals.log.emit(f"Running: {item.text}")
-                runner.run_item(item.text)
-                mark_todo_done(item)
-                completed += 1
-                self.signals.progress.emit(completed, total)
-                self.signals.log.emit(f"Completed: {item.text}")
-            self.signals.log.emit("All pending TODO items have been implemented.")
-        except Exception as exc:
-            self.signals.log.emit(f"[ERROR] {exc}")
-        finally:
-            self.signals.done.emit(True, "")
+        self.open_video_btn.clicked.connect(self._open_walkthrough_video)
+        self.open_viewer_btn.clicked.connect(self._open_live_viewer)
+        self.open_outputs_btn.clicked.connect(lambda: _open_path(Path(self.manifest.output_dir)))
+        self.test_api_btn.clicked.connect(self._test_live_api)
+        self.export_workflow_btn.clicked.connect(self._export_workflow_package)
+        self.push_workflow_btn.clicked.connect(self._push_workflow_package)
+        self.open_vault_flows_btn.clicked.connect(self._open_vault_flows)
+        return page
 
-    def _on_run_finished(self, _success: bool, _message: str):
-        self.reload_todos()
-        self.start_btn.setEnabled(True)
+    def _append_log(self, message: str) -> None:
+        self.log_view.append(message)
 
+    def _set_running(self, running: bool) -> None:
+        self.is_running = running
+        self.run_stage_btn.setEnabled(not running)
+        self.run_remaining_btn.setEnabled(not running)
+        self.pick_video_btn.setEnabled(not running)
+        self.use_demo_btn.setEnabled(not running)
+        self.stage_list.setEnabled(not running)
 
-def load_todos():
-    content = TODO_PATH.read_text(encoding="utf-8").splitlines()
-    items = []
-    for idx, line in enumerate(content):
-        stripped = line.strip()
-        if stripped.startswith("- [ ] ") or stripped.startswith("- [x] "):
-            done = stripped.startswith("- [x] ")
-            text = stripped[6:].strip()
-            items.append(TodoItem(line_index=idx, text=text, done=done))
-    return items
+    def _pick_video(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose input video",
+            str(ROOT),
+            "Video Files (*.mp4 *.mov *.avi *.mkv *.webm);;All Files (*.*)",
+        )
+        if file_path:
+            self._reset_job(Path(file_path))
 
+    def _use_demo_video(self) -> None:
+        self._reset_job(DEFAULT_SOURCE_VIDEO)
 
-def mark_todo_done(item: TodoItem):
-    lines = TODO_PATH.read_text(encoding="utf-8").splitlines()
-    line = lines[item.line_index]
-    if "- [ ] " in line:
-        lines[item.line_index] = line.replace("- [ ] ", "- [x] ", 1)
-    TODO_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    def _reset_job(self, source_video: Path) -> None:
+        if self.is_running:
+            return
+        self.manifest = create_job_manifest(source_video=source_video, camera_prompt=self.camera_prompt_edit.text() or DEFAULT_CAMERA_PROMPT)
+        self.selected_stage_key = self.manifest.current_stage_key
+        self.show_finish_panel = False
+        self.log_view.clear()
+        self._append_log(f"Created new job {self.manifest.job_id} for {source_video}")
+        self._render_manifest()
+
+    def _save_camera_prompt(self) -> None:
+        self.manifest.metadata["cameraPrompt"] = self.camera_prompt_edit.text().strip() or DEFAULT_CAMERA_PROMPT
+        self._append_log("Updated camera prompt for this job.")
+        manifest_path = Path(self.manifest.output_dir) / "manifest.json"
+        manifest_path.write_text(json.dumps(self.manifest.to_dict(), indent=2), encoding="utf-8")
+
+    def _on_stage_selected(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
+        if current is None:
+            return
+        self.selected_stage_key = current.data(Qt.UserRole)
+        self.show_finish_panel = False
+        self._render_manifest()
+
+    def _run_selected_stage(self) -> None:
+        self._start_worker(run_remaining=False)
+
+    def _run_remaining(self) -> None:
+        self._start_worker(run_remaining=True)
+
+    def _start_worker(self, run_remaining: bool) -> None:
+        if self.is_running:
+            return
+        self._save_camera_prompt()
+        self.signals.running_changed.emit(True)
+
+        def worker() -> None:
+            try:
+                runner = DigitalTwinStudioRunner(self.manifest, self.signals.log.emit, strict_mode=self.strict_mode)
+                if run_remaining:
+                    result = runner.run_remaining(self.selected_stage_key)
+                else:
+                    result = runner.run_stage(self.selected_stage_key)
+            except Exception as exc:  # noqa: BLE001
+                self.signals.log.emit(f"[ERROR] {exc}")
+                self.signals.manifest_changed.emit(self.manifest)
+            else:
+                self.signals.manifest_changed.emit(result)
+            finally:
+                self.signals.running_changed.emit(False)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_manifest_changed(self, manifest: JobManifest) -> None:
+        self.manifest = manifest
+        if manifest.state == StageState.COMPLETE.value:
+            self.show_finish_panel = True
+        self._render_manifest()
+
+    def _render_manifest(self) -> None:
+        self.job_title.setText(f"Current Job: {self.manifest.job_id}")
+        self.job_meta.setText(
+            f"Profile: {self.manifest.execution_profile}\nMode: {self.manifest.mode}\nArtifacts: USD, cameras, MP4"
+        )
+        self.source_video_label.setText(f"Source Video: {self.manifest.source_video}")
+
+        self.stage_list.blockSignals(True)
+        self.stage_list.clear()
+        for index, stage in enumerate(self.manifest.stages, start=1):
+            label = f"{index}. {stage.title}  [{STATE_LABELS.get(stage.state, stage.state)}]"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, stage.key)
+            self.stage_list.addItem(item)
+            if stage.key == self.selected_stage_key:
+                self.stage_list.setCurrentItem(item)
+        self.stage_list.blockSignals(False)
+
+        completed = len([stage for stage in self.manifest.stages if stage.state == StageState.COMPLETE.value])
+        total = len(self.manifest.stages)
+        progress = int((completed / total) * 100) if total else 0
+        current_stage = next(stage for stage in self.manifest.stages if stage.key == self.manifest.current_stage_key)
+        self.state_title.setText(f"Run State: {STATE_LABELS.get(self.manifest.state, self.manifest.state)}")
+        self.state_message.setText(current_stage.message or "Ready to execute the selected stage.")
+        self.progress_bar.setValue(progress)
+        self.progress_label.setText(f"Step {completed if completed < total else total} of {total}")
+
+        self.finish_summary.setText(
+            "The digital twin job completed. Open the final walkthrough video, launch the optional live 3D viewer, or inspect any previous step from the rail."
+        )
+
+        self._render_selected_stage()
+
+    def _render_selected_stage(self) -> None:
+        if self.manifest.state == StageState.COMPLETE.value and self.show_finish_panel:
+            self.viewer_stack.setCurrentWidget(self.finish_page)
+            return
+
+        stage = next(stage for stage in self.manifest.stages if stage.key == self.selected_stage_key)
+        self.viewer_stack.setCurrentWidget(self.step_page)
+        self.step_title.setText(stage.title)
+        self.step_description.setText(stage.description)
+        self.step_message.setText(stage.message or "This stage has not started yet.")
+
+        show_prompt = stage.key == "usd_cameras"
+        self.camera_prompt_card.setVisible(show_prompt)
+        self.return_to_finish_btn.setVisible(self.manifest.state == StageState.COMPLETE.value)
+
+        image_artifacts = [artifact for artifact in stage.artifacts if artifact.kind == "image"]
+        for label, artifact in zip(self.preview_labels, image_artifacts[:3], strict=False):
+            pixmap = QPixmap(artifact.path)
+            if not pixmap.isNull():
+                label.setPixmap(pixmap.scaled(260, 160, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                label.setText(Path(artifact.path).name)
+        for label in self.preview_labels[len(image_artifacts[:3]):]:
+            label.setPixmap(QPixmap())
+            label.setText("Preview pending")
+
+        while self.artifact_buttons_layout.count():
+            item = self.artifact_buttons_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        for artifact in stage.artifacts[:6]:
+            button = QPushButton(artifact.label, self)
+            button.clicked.connect(lambda _checked=False, artifact_path=artifact.path: _open_path(Path(artifact_path)))
+            self.artifact_buttons_layout.addWidget(button)
+
+    def _show_finish_panel(self) -> None:
+        self.show_finish_panel = True
+        self._render_manifest()
+
+    def _integration_settings(self) -> VaultFlowsConnectionSettings:
+        return VaultFlowsConnectionSettings(
+            api_base=self.api_base_edit.text().strip(),
+            app_url=self.app_url_edit.text().strip(),
+            bearer_token=self.bearer_token_edit.text(),
+            api_key=self.api_key_edit.text(),
+        )
+
+    def _open_walkthrough_video(self) -> None:
+        if not self.manifest.walkthrough_video:
+            self._append_log("No walkthrough video has been generated yet.")
+            return
+        _open_path(Path(self.manifest.walkthrough_video))
+
+    def _open_live_viewer(self) -> None:
+        point_cloud = Path(self.manifest.output_dir) / "reconstruction" / "cloud.ply"
+
+        def worker() -> None:
+            success, message = open_live_viewer(point_cloud)
+            self.signals.log.emit(message if success else f"[ERROR] {message}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _test_live_api(self) -> None:
+        settings = self._integration_settings()
+
+        def worker() -> None:
+            try:
+                result = test_vaultwares_api(settings)
+                self.signals.log.emit(json.dumps(result, indent=2))
+            except Exception as exc:  # noqa: BLE001
+                self.signals.log.emit(f"[ERROR] {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _export_workflow_package(self) -> None:
+        output_path = Path(self.manifest.output_dir) / "vault_flows_workflow.json"
+        export_vaultflows_workflow(self.manifest, output_path)
+        self._append_log(f"Exported Vault Flows workflow package: {output_path}")
+
+    def _push_workflow_package(self) -> None:
+        settings = self._integration_settings()
+
+        def worker() -> None:
+            try:
+                result = push_workflow_to_vaultwares(settings, self.manifest)
+                self.signals.log.emit(json.dumps(result, indent=2))
+            except Exception as exc:  # noqa: BLE001
+                self.signals.log.emit(f"[ERROR] {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _open_vault_flows(self) -> None:
+        settings = self._integration_settings()
+        if not settings.app_url:
+            self._append_log("Vault Flows URL is empty.")
+            return
+
+        if settings.app_url.startswith(("http://", "https://")):
+            if os.name == "nt":
+                os.startfile(settings.app_url)  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(["xdg-open", settings.app_url])
+            return
+
+        _open_path(Path(settings.app_url))
+
+    def set_strict_mode(self, strict_mode: bool) -> None:
+        self.strict_mode = strict_mode
+        self._append_log(f"Strict mode set to {strict_mode}")
+
 
 class Window(FluentWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("USD Digital Twin Playground")
-        icon_path = ROOT / "icon.png"
-        if icon_path.exists():
-            self.setWindowIcon(QIcon(str(icon_path)))
+        self.setWindowTitle("Digital Twin Studio")
+        if ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(ICON_PATH)))
 
-        self.listener = RedisListener()
-        self.listener.message_received.connect(self.handle_message)
-        self.listener.start()
-
-        # Create widgets
         self.dashboard = DashboardWidget(self)
-        self.capture_interface = Widget("Capture & Extraction", self)
-        self.recon_interface = Widget("3D Reconstruction", self)
-        self.usd_interface = Widget("USD Scene Editor", self)
-        self.cosmos_interface = Widget("Cosmos Augmentation", self)
-        self.setting_interface = Widget("Settings", self)
+        self.settings = SettingsTab(self)
+        self.settings.toggle_btn.clicked.connect(self._toggle_strict_mode)
 
-        self.init_navigation()
-        self.init_window()
+        self.addSubInterface(self.dashboard, FIF.HOME, "Studio")
+        self.addSubInterface(self.settings, FIF.SETTING, "Settings", NavigationItemPosition.BOTTOM)
+        self.resize(1320, 860)
 
-    def init_navigation(self):
-        self.addSubInterface(self.dashboard, FIF.HOME, "Dashboard")
-        self.addSubInterface(self.capture_interface, FIF.VIDEO, "Capture")
-        self.addSubInterface(self.recon_interface, FIF.CODE, "Reconstruction")
-        self.addSubInterface(self.usd_interface, FIF.BASKETBALL, "Scene Setup")
-        self.addSubInterface(self.cosmos_interface, FIF.APPLICATION, "Cosmos AI")
-        
-        self.navigationInterface.addItem(
-            routeKey="Settings",
-            icon=FIF.SETTING,
-            text="Settings",
-            onClick=lambda: self.switchTo(self.setting_interface),
-            position=NavigationItemPosition.BOTTOM
-        )
+    def _toggle_strict_mode(self) -> None:
+        strict_mode = not self.dashboard.strict_mode
+        self.dashboard.set_strict_mode(strict_mode)
+        self.settings.set_mode(strict_mode)
 
-    def init_window(self):
-        self.resize(1100, 750)
-        desktop = QApplication.primaryScreen().availableGeometry()
-        w, h = desktop.width(), desktop.height()
-        self.move(w//2 - self.width()//2, h//2 - self.height()//2)
-
-    def handle_message(self, data):
-        action = data.get("action")
-        agent = data.get("agent")
-        task = data.get("task")
-        if action == "RESULT":
-            details = data.get("details", {})
-            result = details.get("result", "No result info")
-            self.dashboard.append_log(f"[SUCCESS] {agent} finished {task}: {result}")
-        else:
-            self.dashboard.append_log(f"[ASSIGN] {agent} assigned {task}")
 
 if __name__ == "__main__":
     if sys.stdout.encoding != "utf-8":
@@ -515,8 +674,7 @@ if __name__ == "__main__":
         sys.stderr.reconfigure(encoding="utf-8")
 
     app = QApplication(sys.argv)
-    setTheme(Theme.DARK)
-
-    w = Window()
-    w.show()
+    setTheme(Theme.LIGHT)
+    window = Window()
+    window.show()
     sys.exit(app.exec())

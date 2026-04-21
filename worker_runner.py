@@ -1,7 +1,7 @@
 import os
 import sys
-import time
 import threading
+import time
 
 if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -12,14 +12,11 @@ if sys.stderr.encoding != 'utf-8':
 sys.path.insert(0, os.path.abspath("vaultwares_agentciation"))
 
 import hook_registry
-print(f"DEBUG: hook_registry file: {hook_registry.__file__}")
-import inspect
-print(f"DEBUG: HookRegistry.trigger signature: {inspect.signature(hook_registry.HookRegistry.trigger)}")
-
-from agents.video_agent import VideoAgent
-from agents.text_agent import TextAgent
-from agents.reconstruction_agent import ReconstructionAgent
 from agents.omni_agent import OmniAgent
+from agents.reconstruction_agent import ReconstructionAgent
+from agents.text_agent import TextAgent
+from agents.video_agent import VideoAgent
+
 
 def start_video_agent():
     print("Starting Video Agent...")
@@ -50,15 +47,15 @@ def start_omni_agent():
         time.sleep(1)
 
 if __name__ == "__main__":
-    t1 = threading.Thread(target=start_video_agent, daemon=True)
-    t2 = threading.Thread(target=start_text_agent, daemon=True)
-    t3 = threading.Thread(target=start_reconstruction_agent, daemon=True)
-    t4 = threading.Thread(target=start_omni_agent, daemon=True)
+    threads = [
+        threading.Thread(target=start_video_agent, daemon=True),
+        threading.Thread(target=start_text_agent, daemon=True),
+        threading.Thread(target=start_reconstruction_agent, daemon=True),
+        threading.Thread(target=start_omni_agent, daemon=True),
+    ]
     
-    t1.start()
-    t2.start()
-    t3.start()
-    t4.start()
+    for thread in threads:
+        thread.start()
     
     print("\nReady for Digital Twin Pipeline!")
     print("Agents online: Video, Text, Reconstruction, Omni (USD)")
@@ -68,3 +65,5 @@ if __name__ == "__main__":
             time.sleep(1)
     except KeyboardInterrupt:
         print("Shutting down workers...")
+        for thread in threads:
+            thread.join(timeout=0.2)

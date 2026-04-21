@@ -1,9 +1,11 @@
-import time
+import argparse
 import json
 import os
 import sys
-import redis
 import threading
+import time
+
+import redis
 
 if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -14,12 +16,14 @@ if sys.stderr.encoding != 'utf-8':
 sys.path.insert(0, os.path.abspath("vaultwares_agentciation"))
 
 class PipelineOrchestrator:
-    def __init__(self, redis_host='localhost', redis_port=6379):
+    def __init__(self, redis_host='localhost', redis_port=6379, source_video='test_input.mp4'):
         self.r = redis.Redis(host=redis_host, port=redis_port, db=0, decode_responses=True)
         self.pubsub = self.r.pubsub()
         self.channel = "tasks"
         self.results = {}
         self.stop_event = threading.Event()
+        self.source_video = source_video
+        self.r.ping()
 
     def _listen_for_results(self):
         print(f"[Orchestrator] listening on '{self.channel}'...")
@@ -28,7 +32,11 @@ class PipelineOrchestrator:
             if self.stop_event.is_set():
                 break
             if message['type'] == 'message':
-                data = json.loads(message['data'])
+                try:
+                    data = json.loads(message['data'])
+                except json.JSONDecodeError:
+                    print("[WARN] Ignoring non-JSON message on tasks channel.")
+                    continue
                 action = data.get('action')
                 if action == "RESULT":
                     task = data.get('task')
@@ -55,7 +63,12 @@ class PipelineOrchestrator:
             if time.time() - start_time > timeout:
                 raise TimeoutError(f"Task '{task}' timed out after {timeout}s")
             time.sleep(1)
-        return self.results[task]
+        result = self.results[task]
+        details = result.get("details", {})
+        result_text = str(details.get("result", ""))
+        if result_text.startswith("ERROR:"):
+            raise RuntimeError(f"Task '{task}' failed: {result_text}")
+        return result
 
     def run(self):
         listener_thread = threading.Thread(target=self._listen_for_results, daemon=True)
@@ -70,6 +83,7 @@ class PipelineOrchestrator:
                 task="sample_frames",
                 details={
                     "source": "test_input.mp4",
+                    "source": self.source_video,
                     "output_dir": "data/extracted_frames",
                     "fps": 2  # Higher FPS for better recon
                 }
@@ -107,5 +121,8 @@ class PipelineOrchestrator:
             self.stop_event.set()
 
 if __name__ == "__main__":
-    orchestrator = PipelineOrchestrator()
+    parser = argparse.ArgumentParser(description="Run Redis-driven USD pipeline orchestrator.")
+    parser.add_argument("--source", default="test_input.mp4", help="Input video path for frame extraction.")
+    args = parser.parse_args()
+    orchestrator = PipelineOrchestrator(source_video=args.source)
     orchestrator.run()

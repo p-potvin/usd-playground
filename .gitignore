@@ -204,6 +204,8 @@ cython_debug/
 # Smoke-test outputs
 data/test_outputs/
 data/demo_outputs/
+data/jobs/
+.superpowers/
 
 # Marimo
 marimo/_static/

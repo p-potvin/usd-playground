@@ -1,0 +1,16 @@
+{
+  "active": false,
+  "mode": "ralph",
+  "current_phase": "complete",
+  "started_at": "2026-04-20T21:37:06.912Z",
+  "updated_at": "2026-04-20T18:44:49Z",
+  "thread_id": "019dacff-2649-7263-be4b-a4c39dfd9f33",
+  "turn_id": "019dacff-27d3-7e42-8887-5a2f920cb7a5",
+  "iteration": 15,
+  "max_iterations": 50,
+  "last_turn_at": "2026-04-20T22:31:58.112Z",
+  "completed_at": "2026-04-20T18:44:49Z",
+  "state": {
+    "context_snapshot_path": ".omx/context/digital-twin-studio-20260420T183414Z.md"
+  }
+}
