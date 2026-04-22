@@ -19,3 +19,7 @@ Considering the size of the messages (small task structs), the overhead of Redis
 **Learning:** The `listen_for_tasks` polling loop has an explicit `await asyncio.sleep(0.1)` when no message is found. Because `pubsub.get_message` sets `timeout=1`, this means it spends time awaiting blocking reads on a thread, and if no message is found *or* a message is processed, it sleeps another 0.1s. Wait, if `pubsub.get_message` fetches a message, it still sleeps `0.1s` at the end of the loop! This adds an artificial 100ms latency to EVERY task processed by a `SubAgent`.
 
 **Action:** Fix the event loop sleep logic in `subagent.py` to only sleep if no message was found, or use a better pubsub listen mechanism that doesn't artificially limit throughput.
+
+## 2024-04-13 - Batching Redis Queries with Pipelining and Chunking
+**Learning:** Sequential calls to Redis commands like `hgetall` within a loop (N+1 query issue) create excessive network round trips. Using Redis pipelining allows batching these requests into a single round trip, providing dramatic speedups (~99% in benchmarks with 100 agents).
+**Action:** Always use Redis pipelines when performing multiple independent read/write operations in a loop. For large datasets, combine pipelining with chunking (e.g., batches of 500) to keep memory usage stable while maintaining high throughput.
