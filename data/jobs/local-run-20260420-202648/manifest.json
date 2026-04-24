@@ -1,0 +1,63 @@
+{
+  "job_id": "local-run-20260420-202648",
+  "source_video": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\my-room.mp4",
+  "output_dir": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-202648",
+  "execution_profile": "RTX 3060 12GB Safe",
+  "mode": "guided",
+  "state": "queued",
+  "current_stage_key": "video_intake",
+  "walkthrough_video": null,
+  "live_viewer_supported": true,
+  "metadata": {
+    "cameraPrompt": "show me the desk from the doorway, then orbit left and rise"
+  },
+  "stages": [
+    {
+      "key": "video_intake",
+      "title": "Video Intake",
+      "description": "Inspect the input video and initialize a local-safe job profile.",
+      "state": "queued",
+      "message": "",
+      "artifacts": [],
+      "metadata": {}
+    },
+    {
+      "key": "frame_extraction",
+      "title": "Frame Extraction",
+      "description": "Extract frames, keep previews, and capture sampling metadata.",
+      "state": "queued",
+      "message": "",
+      "artifacts": [],
+      "metadata": {}
+    },
+    {
+      "key": "reconstruction",
+      "title": "Reconstruction",
+      "description": "Run COLMAP / Nerfstudio / gsplat or fall back to placeholder-safe outputs.",
+      "state": "queued",
+      "message": "",
+      "artifacts": [],
+      "metadata": {}
+    },
+    {
+      "key": "usd_cameras",
+      "title": "USD + Cameras",
+      "description": "Compose the USD stage and generate preset plus prompt-directed cameras.",
+      "state": "queued",
+      "message": "",
+      "artifacts": [],
+      "metadata": {}
+    },
+    {
+      "key": "cosmos_output",
+      "title": "Cosmos + Output",
+      "description": "Write optional Cosmos outputs and produce the final walkthrough video.",
+      "state": "queued",
+      "message": "",
+      "artifacts": [],
+      "metadata": {}
+    }
+  ],
+  "created_at": "2026-04-21T00:26:48Z",
+  "updated_at": "2026-04-21T00:26:48Z"
+}

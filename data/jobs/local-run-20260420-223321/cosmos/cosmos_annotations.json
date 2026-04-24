@@ -1,0 +1,14 @@
+{
+  "sourceStage": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\usd\\digital_twin_scene.usda",
+  "model": "cosmos-reason2 (placeholder-safe)",
+  "annotations": [
+    {
+      "label": "environment",
+      "path": "/World/Environment"
+    },
+    {
+      "label": "digital-twin",
+      "path": "/World/DigitalTwin"
+    }
+  ]
+}

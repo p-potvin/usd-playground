@@ -1,0 +1,112 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def "Environment"
+    {
+        def Cube "Ground"
+        {
+            double size = 1
+            float3 xformOp:scale = (20, 0.1, 20)
+            double3 xformOp:translate = (0, -0.05000000074505806, 0)
+            uniform token[] xformOpOrder = ["xformOp:scale", "xformOp:translate"]
+        }
+
+        def DistantLight "Sun"
+        {
+            float inputs:intensity = 900
+        }
+    }
+
+    def Xform "DigitalTwin" (
+        prepend references = @C:\Users\Administrator\Desktop\Github Repos\usd-playground\data\jobs\local-run-20260420-184411\reconstruction\cloud.usda@
+    )
+    {
+        custom string sourceVideo = "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\my-room.mp4"
+    }
+
+    def Xform "Navigation"
+    {
+        def Camera "entrance_view"
+        {
+            float2 clippingRange = (0.1, 10000)
+            float focalLength = 24
+            float horizontalAperture = 36
+            custom string shotDescription = "Safe establishing shot from the doorway aimed into the room."
+            custom string shotSource = "preset"
+            double3 xformOp:translate = (0, 1.600000023841858, 4.800000190734863)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+
+        def Camera "workbench_orbit"
+        {
+            float2 clippingRange = (0.1, 10000)
+            float focalLength = 24
+            float horizontalAperture = 36
+            custom string shotDescription = "Three-quarter view that circles the main subject area."
+            custom string shotSource = "preset"
+            double3 xformOp:translate = (2.5999999046325684, 1.7000000476837158, 2.799999952316284)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+
+        def Camera "overhead_sweep"
+        {
+            float2 clippingRange = (0.1, 10000)
+            float focalLength = 24
+            float horizontalAperture = 36
+            custom string shotDescription = "High angle shot for spatial understanding and layout review."
+            custom string shotSource = "preset"
+            double3 xformOp:translate = (0, 6.5, 0.4000000059604645)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+
+        def Camera "doorway_start"
+        {
+            float2 clippingRange = (0.1, 10000)
+            float focalLength = 24
+            float horizontalAperture = 36
+            custom string shotDescription = "Prompt-derived doorway framing."
+            custom string shotSource = "prompt"
+            double3 xformOp:translate = (-0.4000000059604645, 1.600000023841858, 5.099999904632568)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+
+        def Camera "desk_focus"
+        {
+            float2 clippingRange = (0.1, 10000)
+            float focalLength = 24
+            float horizontalAperture = 36
+            custom string shotDescription = "Prompt-derived focal view toward the main work surface."
+            custom string shotSource = "prompt"
+            double3 xformOp:translate = (1.7999999523162842, 1.4500000476837158, 2)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+
+        def Camera "orbit_move"
+        {
+            float2 clippingRange = (0.1, 10000)
+            float focalLength = 24
+            float horizontalAperture = 36
+            custom string shotDescription = "Prompt-derived lateral orbit shot around the subject."
+            custom string shotSource = "prompt"
+            double3 xformOp:translate = (-2.799999952316284, 1.7999999523162842, 1.7999999523162842)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+
+        def Camera "rise_shot"
+        {
+            float2 clippingRange = (0.1, 10000)
+            float focalLength = 24
+            float horizontalAperture = 36
+            custom string shotDescription = "Prompt-derived rising finish shot for overview and reveal."
+            custom string shotSource = "prompt"
+            double3 xformOp:translate = (0, 5.800000190734863, 1.2000000476837158)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+}
+

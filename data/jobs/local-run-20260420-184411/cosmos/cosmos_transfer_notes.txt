@@ -1,0 +1,2 @@
+Placeholder-safe Cosmos Transfer notes.
+Source stage: C:\Users\Administrator\Desktop\Github Repos\usd-playground\data\jobs\local-run-20260420-184411\usd\digital_twin_scene.usda

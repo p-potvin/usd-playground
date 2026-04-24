@@ -1,0 +1,485 @@
+{
+  "id": "local-run-20260420-223321",
+  "name": "Digital Twin Studio - my-room",
+  "category": "Digital Twin",
+  "description": "Guided local-first digital twin workflow exported from usd-playground for Vault Flows / Vaultwares Pipelines.",
+  "pin": true,
+  "favorite": true,
+  "lastRun": "2026-04-21T02:43:54Z",
+  "steps": [
+    {
+      "id": "video_intake",
+      "title": "Video Intake",
+      "description": "Inspect the input video and initialize a local-safe job profile.",
+      "state": "complete",
+      "message": "Video metadata captured and job initialized.",
+      "artifacts": [
+        {
+          "label": "Input Metadata",
+          "kind": "json",
+          "path": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\input_metadata.json",
+          "description": "Video intake metadata."
+        }
+      ],
+      "metadata": {
+        "sourceVideo": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\my-room.mp4",
+        "fileSizeBytes": 35053938,
+        "executionProfile": "RTX 3060 12GB Safe",
+        "mode": "guided",
+        "probe": {
+          "streams": [
+            {
+              "index": 0,
+              "codec_name": "h264",
+              "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+              "profile": "High",
+              "codec_type": "video",
+              "codec_tag_string": "avc1",
+              "codec_tag": "0x31637661",
+              "width": 1920,
+              "height": 1080,
+              "coded_width": 1920,
+              "coded_height": 1080,
+              "has_b_frames": 0,
+              "pix_fmt": "yuv420p",
+              "level": 42,
+              "color_range": "tv",
+              "color_space": "bt709",
+              "color_transfer": "bt709",
+              "color_primaries": "bt709",
+              "chroma_location": "left",
+              "field_order": "progressive",
+              "refs": 1,
+              "is_avc": "true",
+              "nal_length_size": "4",
+              "id": "0x1",
+              "r_frame_rate": "60000/1001",
+              "avg_frame_rate": "85920/1433",
+              "time_base": "1/600",
+              "start_pts": 0,
+              "start_time": "0.000000",
+              "duration_ts": 7165,
+              "duration": "11.941667",
+              "bit_rate": "23242598",
+              "bits_per_raw_sample": "8",
+              "nb_frames": "716",
+              "extradata_size": 158,
+              "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+              },
+              "tags": {
+                "creation_time": "2026-04-04T19:01:18.000000Z",
+                "language": "und",
+                "handler_name": "Core Media Video",
+                "vendor_id": "[0][0][0][0]",
+                "encoder": "H.264"
+              },
+              "side_data_list": [
+                {
+                  "side_data_type": "Display Matrix",
+                  "displaymatrix": "\n00000000:            0       65536           0\n00000001:       -65536           0           0\n00000002:     70778880           0  1073741824\n",
+                  "rotation": -90
+                }
+              ]
+            },
+            {
+              "index": 1,
+              "codec_name": "aac",
+              "codec_long_name": "AAC (Advanced Audio Coding)",
+              "profile": "LC",
+              "codec_type": "audio",
+              "codec_tag_string": "mp4a",
+              "codec_tag": "0x6134706d",
+              "sample_fmt": "fltp",
+              "sample_rate": "48000",
+              "channels": 2,
+              "channel_layout": "stereo",
+              "bits_per_sample": 0,
+              "initial_padding": 0,
+              "id": "0x2",
+              "r_frame_rate": "0/0",
+              "avg_frame_rate": "0/0",
+              "time_base": "1/48000",
+              "start_pts": 0,
+              "start_time": "0.000000",
+              "duration_ts": 573120,
+              "duration": "11.940000",
+              "bit_rate": "151072",
+              "nb_frames": "562",
+              "extradata_size": 2,
+              "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+              },
+              "tags": {
+                "creation_time": "2026-04-04T19:01:18.000000Z",
+                "language": "und",
+                "handler_name": "Core Media Audio",
+                "vendor_id": "[0][0][0][0]"
+              }
+            },
+            {
+              "index": 2,
+              "codec_type": "data",
+              "codec_tag_string": "mebx",
+              "codec_tag": "0x7862656d",
+              "id": "0x3",
+              "r_frame_rate": "0/0",
+              "avg_frame_rate": "0/0",
+              "time_base": "1/600",
+              "start_pts": 0,
+              "start_time": "0.000000",
+              "duration_ts": 7165,
+              "duration": "11.941667",
+              "bit_rate": "6",
+              "nb_frames": "1",
+              "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+              },
+              "tags": {
+                "creation_time": "2026-04-04T19:01:18.000000Z",
+                "language": "und",
+                "handler_name": "Core Media Metadata"
+              }
+            },
+            {
+              "index": 3,
+              "codec_type": "data",
+              "codec_tag_string": "mebx",
+              "codec_tag": "0x7862656d",
+              "id": "0x4",
+              "r_frame_rate": "0/0",
+              "avg_frame_rate": "0/0",
+              "time_base": "1/600",
+              "start_pts": 0,
+              "start_time": "0.000000",
+              "duration_ts": 7165,
+              "duration": "11.941667",
+              "bit_rate": "5",
+              "nb_frames": "1",
+              "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+              },
+              "tags": {
+                "creation_time": "2026-04-04T19:01:18.000000Z",
+                "language": "und",
+                "handler_name": "Core Media Metadata"
+              }
+            },
+            {
+              "index": 4,
+              "codec_type": "data",
+              "codec_tag_string": "mebx",
+              "codec_tag": "0x7862656d",
+              "id": "0x5",
+              "r_frame_rate": "0/0",
+              "avg_frame_rate": "0/0",
+              "time_base": "1/600",
+              "start_pts": 0,
+              "start_time": "0.000000",
+              "duration_ts": 7165,
+              "duration": "11.941667",
+              "bit_rate": "69071",
+              "nb_frames": "716",
+              "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+              },
+              "tags": {
+                "creation_time": "2026-04-04T19:01:18.000000Z",
+                "language": "und",
+                "handler_name": "Core Media Metadata"
+              }
+            },
+            {
+              "index": 5,
+              "codec_type": "data",
+              "codec_tag_string": "mebx",
+              "codec_tag": "0x7862656d",
+              "id": "0x6",
+              "r_frame_rate": "0/0",
+              "avg_frame_rate": "0/0",
+              "time_base": "1/600",
+              "start_pts": 0,
+              "start_time": "0.000000",
+              "duration_ts": 7165,
+              "duration": "11.941667",
+              "bit_rate": "29",
+              "nb_frames": "1",
+              "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+              },
+              "tags": {
+                "creation_time": "2026-04-04T19:01:18.000000Z",
+                "language": "und",
+                "handler_name": "Core Media Metadata"
+              }
+            }
+          ],
+          "format": {
+            "filename": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\my-room.mp4",
+            "nb_streams": 6,
+            "nb_programs": 0,
+            "nb_stream_groups": 0,
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "format_long_name": "QuickTime / MOV",
+            "start_time": "0.000000",
+            "duration": "11.941667",
+            "size": "35053938",
+            "bit_rate": "23483446",
+            "probe_score": 100,
+            "tags": {
+              "major_brand": "qt  ",
+              "minor_version": "0",
+              "compatible_brands": "qt  ",
+              "creation_time": "2026-04-04T19:01:18.000000Z",
+              "com.apple.quicktime.location.accuracy.horizontal": "29.903561",
+              "com.apple.quicktime.full-frame-rate-playback-intent": "0",
+              "com.apple.quicktime.location.ISO6709": "+46.0336-073.1081/",
+              "com.apple.quicktime.make": "Apple",
+              "com.apple.quicktime.model": "iPhone 11",
+              "com.apple.quicktime.software": "26.3.1",
+              "com.apple.quicktime.creationdate": "2026-04-04T15:01:18-0400"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "frame_extraction",
+      "title": "Frame Extraction",
+      "description": "Extract frames, keep previews, and capture sampling metadata.",
+      "state": "complete",
+      "message": "Extracted 24 frames.",
+      "artifacts": [
+        {
+          "label": "Frames Manifest",
+          "kind": "json",
+          "path": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\frames\\frames_manifest.json",
+          "description": "Frame extraction summary."
+        },
+        {
+          "label": "Frame Preview 1",
+          "kind": "image",
+          "path": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\frames\\frame_0001.png",
+          "description": "Sample extracted frame."
+        },
+        {
+          "label": "Frame Preview 2",
+          "kind": "image",
+          "path": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\frames\\frame_0002.png",
+          "description": "Sample extracted frame."
+        },
+        {
+          "label": "Frame Preview 3",
+          "kind": "image",
+          "path": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\frames\\frame_0003.png",
+          "description": "Sample extracted frame."
+        }
+      ],
+      "metadata": {
+        "frameCount": 24
+      }
+    },
+    {
+      "id": "reconstruction",
+      "title": "Reconstruction",
+      "description": "Run COLMAP / Nerfstudio / gsplat or fall back to placeholder-safe outputs.",
+      "state": "complete",
+      "message": "Reconstruction completed with placeholder-safe outputs.",
+      "artifacts": [
+        {
+          "label": "Reconstruction Stage",
+          "kind": "usd",
+          "path": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\reconstruction\\cloud.usda",
+          "description": "Reconstruction stage."
+        },
+        {
+          "label": "Reconstruction PLY",
+          "kind": "ply",
+          "path": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\reconstruction\\cloud.ply",
+          "description": "Point cloud output."
+        }
+      ],
+      "metadata": {
+        "degraded": true
+      }
+    },
+    {
+      "id": "usd_cameras",
+      "title": "USD + Cameras",
+      "description": "Compose the USD stage and generate preset plus prompt-directed cameras.",
+      "state": "complete",
+      "message": "USD stage composed with 7 camera shots.",
+      "artifacts": [
+        {
+          "label": "USD Stage",
+          "kind": "usd",
+          "path": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\usd\\digital_twin_scene.usda",
+          "description": "Composed digital twin stage."
+        },
+        {
+          "label": "Camera Plan",
+          "kind": "json",
+          "path": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\usd\\camera_plan.json",
+          "description": "Preset and prompt camera plan."
+        },
+        {
+          "label": "Camera Preview 1",
+          "kind": "image",
+          "path": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\camera_previews\\shot_01.png",
+          "description": "Generated camera preview."
+        },
+        {
+          "label": "Camera Preview 2",
+          "kind": "image",
+          "path": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\camera_previews\\shot_02.png",
+          "description": "Generated camera preview."
+        },
+        {
+          "label": "Camera Preview 3",
+          "kind": "image",
+          "path": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\camera_previews\\shot_03.png",
+          "description": "Generated camera preview."
+        }
+      ],
+      "metadata": {
+        "cameraCount": 7
+      }
+    },
+    {
+      "id": "cosmos_output",
+      "title": "Cosmos + Output",
+      "description": "Write optional Cosmos outputs and produce the final walkthrough video.",
+      "state": "complete",
+      "message": "Cosmos artifacts written and walkthrough video rendered.",
+      "artifacts": [
+        {
+          "label": "Cosmos Annotation",
+          "kind": "json",
+          "path": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\cosmos\\cosmos_annotations.json",
+          "description": "Reason model output."
+        },
+        {
+          "label": "Cosmos Transfer Notes",
+          "kind": "text",
+          "path": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\cosmos\\cosmos_transfer_notes.txt",
+          "description": "Transfer model notes."
+        },
+        {
+          "label": "Walkthrough Video",
+          "kind": "video",
+          "path": "C:\\Users\\Administrator\\Desktop\\Github Repos\\usd-playground\\data\\jobs\\local-run-20260420-223321\\deliverables\\digital_twin_walkthrough.mp4",
+          "description": "Final MP4 walkthrough."
+        }
+      ],
+      "metadata": {}
+    }
+  ]
+}

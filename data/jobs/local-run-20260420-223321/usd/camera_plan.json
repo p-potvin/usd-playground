@@ -1,0 +1,219 @@
+{
+  "prompt": "show me the desk from the doorway, then orbit left and rise",
+  "presets": [
+    {
+      "name": "Entrance View",
+      "description": "Safe establishing shot from the doorway aimed into the room.",
+      "position": [
+        0.0,
+        1.6,
+        4.8
+      ],
+      "target": [
+        0.0,
+        1.2,
+        0.0
+      ],
+      "source": "preset"
+    },
+    {
+      "name": "Workbench Orbit",
+      "description": "Three-quarter view that circles the main subject area.",
+      "position": [
+        2.6,
+        1.7,
+        2.8
+      ],
+      "target": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "source": "preset"
+    },
+    {
+      "name": "Overhead Sweep",
+      "description": "High angle shot for spatial understanding and layout review.",
+      "position": [
+        0.0,
+        6.5,
+        0.4
+      ],
+      "target": [
+        0.0,
+        0.9,
+        0.0
+      ],
+      "source": "preset"
+    }
+  ],
+  "promptPlan": [
+    {
+      "name": "Doorway Start",
+      "description": "Prompt-derived doorway framing.",
+      "position": [
+        -0.4,
+        1.6,
+        5.1
+      ],
+      "target": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "source": "prompt"
+    },
+    {
+      "name": "Desk Focus",
+      "description": "Prompt-derived focal view toward the main work surface.",
+      "position": [
+        1.8,
+        1.45,
+        2.0
+      ],
+      "target": [
+        0.2,
+        1.1,
+        -0.2
+      ],
+      "source": "prompt"
+    },
+    {
+      "name": "Orbit Move",
+      "description": "Prompt-derived lateral orbit shot around the subject.",
+      "position": [
+        -2.8,
+        1.8,
+        1.8
+      ],
+      "target": [
+        0.0,
+        1.1,
+        0.0
+      ],
+      "source": "prompt"
+    },
+    {
+      "name": "Rise Shot",
+      "description": "Prompt-derived rising finish shot for overview and reveal.",
+      "position": [
+        0.0,
+        5.8,
+        1.2
+      ],
+      "target": [
+        0.0,
+        1.1,
+        0.0
+      ],
+      "source": "prompt"
+    }
+  ],
+  "allShots": [
+    {
+      "name": "Entrance View",
+      "description": "Safe establishing shot from the doorway aimed into the room.",
+      "position": [
+        0.0,
+        1.6,
+        4.8
+      ],
+      "target": [
+        0.0,
+        1.2,
+        0.0
+      ],
+      "source": "preset"
+    },
+    {
+      "name": "Workbench Orbit",
+      "description": "Three-quarter view that circles the main subject area.",
+      "position": [
+        2.6,
+        1.7,
+        2.8
+      ],
+      "target": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "source": "preset"
+    },
+    {
+      "name": "Overhead Sweep",
+      "description": "High angle shot for spatial understanding and layout review.",
+      "position": [
+        0.0,
+        6.5,
+        0.4
+      ],
+      "target": [
+        0.0,
+        0.9,
+        0.0
+      ],
+      "source": "preset"
+    },
+    {
+      "name": "Doorway Start",
+      "description": "Prompt-derived doorway framing.",
+      "position": [
+        -0.4,
+        1.6,
+        5.1
+      ],
+      "target": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "source": "prompt"
+    },
+    {
+      "name": "Desk Focus",
+      "description": "Prompt-derived focal view toward the main work surface.",
+      "position": [
+        1.8,
+        1.45,
+        2.0
+      ],
+      "target": [
+        0.2,
+        1.1,
+        -0.2
+      ],
+      "source": "prompt"
+    },
+    {
+      "name": "Orbit Move",
+      "description": "Prompt-derived lateral orbit shot around the subject.",
+      "position": [
+        -2.8,
+        1.8,
+        1.8
+      ],
+      "target": [
+        0.0,
+        1.1,
+        0.0
+      ],
+      "source": "prompt"
+    },
+    {
+      "name": "Rise Shot",
+      "description": "Prompt-derived rising finish shot for overview and reveal.",
+      "position": [
+        0.0,
+        5.8,
+        1.2
+      ],
+      "target": [
+        0.0,
+        1.1,
+        0.0
+      ],
+      "source": "prompt"
+    }
+  ]
+}
