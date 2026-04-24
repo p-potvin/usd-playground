@@ -215,3 +215,4 @@ __marimo__/
 # oh my codex
 .omx
 .omx/
+.omx/logs
