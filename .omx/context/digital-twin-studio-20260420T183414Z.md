@@ -1,0 +1,31 @@
+# Context Snapshot
+
+- task statement: deliver a complete local-first Digital Twin Creation project and working UI from user video to rendered 3D environment with camera creation, Cosmos usage, and final outputs
+- desired outcome: native guided studio backed by resumable job/stage contracts that can later move into `vaultwares-pipelines` and `vault-flows`
+- known facts/evidence:
+  - current repo already has a `PySide6` / `qfluentwidgets` GUI in `gui_app.py`
+  - current demo pipeline is mostly placeholder-driven across COLMAP, gsplat, and Cosmos stages
+  - smoke test coverage exists, but app-level pipeline tests do not
+  - user approved guided-first native UI with persistent step rail, one state card, main viewer, finish panel swap, final MP4 output, and optional live 3D viewer
+  - user requires both preset and prompt-driven camera direction
+  - user wants explicit stage states and future compatibility with `vaultwares-pipelines` / `vault-flows`
+  - local target hardware is `RTX 3060 12GB VRAM + 32GB RAM`; OOM is the main failure to avoid
+  - `vault-themes/.github/STYLE.md` is the design direction source
+  - Figma MCP is now available in-session
+- constraints:
+  - native app first
+  - local-safe defaults
+  - no unnecessary reinvention of already-implemented pieces
+  - preserve runnable demo behavior while restructuring
+- unknowns/open questions:
+  - exact live 3D viewer implementation depth feasible for v1
+  - which optional heavy dependencies are currently installed on this machine
+  - how much of the reconstruction/Cosmos chain can be made real without external installs
+- likely codebase touchpoints:
+  - `gui_app.py`
+  - `demo_launcher.py`
+  - `run_pipeline_demo.py`
+  - `worker_runner.py`
+  - `requirements.txt`
+  - `tests/`
+  - root `AGENTS.md` for Figma design-system rules
