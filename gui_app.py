@@ -1,12 +1,11 @@
 from __future__ import annotations
-
 import json
 import os
 import subprocess
 import sys
+import shutil
 import threading
 from pathlib import Path
-
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
@@ -36,7 +35,6 @@ from qfluentwidgets import (
     Theme,
     setTheme,
 )
-
 from studio_core.pipeline import (
     DEFAULT_CAMERA_PROMPT,
     DEFAULT_SOURCE_VIDEO,
