@@ -267,6 +267,45 @@ def load_job_manifest(path: Path | str) -> JobManifest:
     return JobManifest.from_dict(payload)
 
 
+def list_job_manifests(jobs_dir: Path | str = JOBS_DIR) -> list[Path]:
+    root = Path(jobs_dir)
+    if not root.exists():
+        return []
+
+    manifests = [path for path in root.glob("*/manifest.json") if path.is_file()]
+    return sorted(manifests, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def load_latest_job_manifest(jobs_dir: Path | str = JOBS_DIR) -> JobManifest | None:
+    manifests = list_job_manifests(jobs_dir)
+    if not manifests:
+        return None
+
+    return load_job_manifest(manifests[0])
+
+
+def completed_stage_count(manifest: JobManifest) -> int:
+    return len([stage for stage in manifest.stages if stage.state == StageState.COMPLETE.value])
+
+
+def next_incomplete_stage_key(manifest: JobManifest) -> str | None:
+    for stage in manifest.stages:
+        if stage.state != StageState.COMPLETE.value:
+            return stage.key
+
+    return None
+
+
+def stage_dependencies_complete(manifest: JobManifest, stage_key: str) -> bool:
+    for stage in manifest.stages:
+        if stage.key == stage_key:
+            return True
+        if stage.state != StageState.COMPLETE.value:
+            return False
+
+    raise KeyError(stage_key)
+
+
 class DigitalTwinStudioRunner:
     def __init__(self, manifest: JobManifest, log: Callable[[str], None], strict_mode: bool = False):
         self.manifest = manifest
@@ -299,6 +338,10 @@ class DigitalTwinStudioRunner:
             "usd_cameras": self._run_usd_cameras,
             "cosmos_output": self._run_cosmos_output,
         }
+        if not stage_dependencies_complete(self.manifest, stage_key):
+            raise RuntimeError(
+                "Complete earlier stages before running this step, or use Run Full Job."
+            )
         stage = self.stage_for(stage_key)
         self.manifest.current_stage_key = stage_key
         self.manifest.state = StageState.RUNNING.value

@@ -14,8 +14,13 @@ from .pipeline import (
     StageRecord,
     StageState,
     build_dependency_health,
+    completed_stage_count,
     create_job_manifest,
+    list_job_manifests,
     load_job_manifest,
+    load_latest_job_manifest,
+    next_incomplete_stage_key,
+    stage_dependencies_complete,
 )
 
 __all__ = [
@@ -30,9 +35,14 @@ __all__ = [
     "build_camera_bundle",
     "build_dependency_health",
     "build_vaultflows_workflow",
+    "completed_stage_count",
     "create_job_manifest",
     "export_vaultflows_workflow",
+    "list_job_manifests",
     "load_job_manifest",
+    "load_latest_job_manifest",
+    "next_incomplete_stage_key",
     "push_workflow_to_vaultwares",
+    "stage_dependencies_complete",
     "test_vaultwares_api",
 ]

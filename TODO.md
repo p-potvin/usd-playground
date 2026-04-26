@@ -5,20 +5,23 @@
 - [x] Integrate `vaultwares-agentciation` framework
 - [x] Add NVIDIA Cosmos submodules (`cosmos-reason2`, `cosmos-transfer2.5`)
 - [x] Refactor pipeline to event-driven orchestrator (`run_pipeline_demo.py`)
+- [x] Add desktop app shell with direct `studio_core` execution
+- [x] Add resumable job manifests under `data/jobs/`
+- [x] Add open latest/open manifest job resume controls
 
 ## Phase 1: Capture & Reconstruction
 
 - [x] Capture test video (simulated with `test_input.mp4`)
-- [ ] Extract frames using ffmpeg
+- [x] Extract frames using ffmpeg
 - [ ] Run COLMAP SfM for camera pose estimation
 - [ ] Train Gaussian Splat model (gsplat/3DGRUT)
-- [ ] Export to PLY
+- [x] Export fallback-safe PLY when heavyweight reconstruction tools are missing
 
 ## Phase 2: USD Conversion & Authoring
 
 - [ ] Convert PLY to OpenUSD (26.03 schema)
-- [ ] Compose scene in USD (add lights, floor)
-- [ ] Validate USD structure
+- [x] Compose scene in USD (add lights, floor)
+- [x] Validate USD structure in smoke tests
 
 ## Phase 3: Isaac Sim Integration
 

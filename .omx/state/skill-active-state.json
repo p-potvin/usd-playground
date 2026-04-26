@@ -23,5 +23,7 @@
     }
   ],
   "initialized_mode": "ralph",
-  "initialized_state_path": ".omx/state/ralph-state.json"
+  "initialized_state_path": ".omx/state/ralph-state.json",
+  "iteration": 1,
+  "last_turn_at": "2026-04-26T00:58:04.978Z"
 }

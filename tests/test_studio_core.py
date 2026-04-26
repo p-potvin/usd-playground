@@ -1,12 +1,21 @@
+import json
+import os
 from pathlib import Path
+
+import pytest
 
 from studio_core.camera_director import build_camera_bundle
 from studio_core.integration import build_vaultflows_workflow
 from studio_core.pipeline import (
     DEFAULT_SOURCE_VIDEO,
+    DigitalTwinStudioRunner,
     StageState,
     create_job_manifest,
+    list_job_manifests,
     load_job_manifest,
+    load_latest_job_manifest,
+    next_incomplete_stage_key,
+    stage_dependencies_complete,
 )
 
 
@@ -25,6 +34,39 @@ def test_create_job_manifest_writes_resumable_job():
         "usd_cameras",
         "cosmos_output",
     ]
+    assert next_incomplete_stage_key(loaded) == "video_intake"
+    assert stage_dependencies_complete(loaded, "video_intake") is True
+    assert stage_dependencies_complete(loaded, "reconstruction") is False
+
+
+def test_job_manifest_history_loads_latest_job(tmp_path):
+    older = create_job_manifest(source_video=DEFAULT_SOURCE_VIDEO)
+    newer = create_job_manifest(source_video=DEFAULT_SOURCE_VIDEO)
+    older_dir = tmp_path / "older"
+    newer_dir = tmp_path / "newer"
+    older_dir.mkdir()
+    newer_dir.mkdir()
+    older_path = older_dir / "manifest.json"
+    newer_path = newer_dir / "manifest.json"
+    older_path.write_text(json.dumps(older.to_dict()), encoding="utf-8")
+    newer_path.write_text(json.dumps(newer.to_dict()), encoding="utf-8")
+    os.utime(older_path, (1, 1))
+    os.utime(newer_path, (2, 2))
+
+    manifests = list_job_manifests(tmp_path)
+    latest = load_latest_job_manifest(tmp_path)
+
+    assert manifests == [newer_path, older_path]
+    assert latest is not None
+    assert latest.job_id == newer.job_id
+
+
+def test_runner_rejects_stage_when_previous_steps_are_incomplete():
+    manifest = create_job_manifest(source_video=DEFAULT_SOURCE_VIDEO)
+    runner = DigitalTwinStudioRunner(manifest, lambda _message: None)
+
+    with pytest.raises(RuntimeError, match="Complete earlier stages"):
+        runner.run_stage("reconstruction")
 
 
 def test_camera_bundle_contains_presets_and_prompt_plan():

@@ -3,9 +3,10 @@
 This repo has two very different layers:
 
 1. A small, practical OpenUSD smoke test you can run locally.
-2. A larger research/demo pipeline that depends on Redis, ffmpeg, Nerfstudio, COLMAP, and extra agent code.
+2. The desktop Digital Twin Studio app, which runs the local pipeline through `studio_core`.
+3. A legacy Redis-driven orchestration demo for advanced agent experiments.
 
-For everyday users, start with the smoke test.
+For everyday users, start with the smoke test, then run the headless app pipeline.
 
 ## Recommended Test
 
@@ -17,7 +18,7 @@ Run this from the repo root.
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install usd-core pytest redis
+python -m pip install usd-core pytest redis PySide6 PySide6-Fluent-Widgets Pillow
 python -m pytest -s
 ```
 
@@ -40,6 +41,30 @@ You can generate the same file without pytest:
 .\.venv\Scripts\python.exe .\usd_smoke.py
 ```
 
+## App Pipeline Verification
+
+Run the local app pipeline without opening the GUI:
+
+```powershell
+.\.venv\Scripts\python.exe .\demo_launcher.py --headless
+```
+
+What success looks like:
+
+- the command exits with code `0`
+- the console prints a `data/jobs/<job-id>/manifest.json` path
+- the console prints a walkthrough video path
+- the manifest state is `complete`
+- outputs exist under `frames/`, `reconstruction/`, `usd/`, `camera_previews/`, and `deliverables/`
+
+The GUI entrypoint is:
+
+```powershell
+.\.venv\Scripts\python.exe .\gui_app.py
+```
+
+Use `Open Latest Job` in the app to reopen the most recent verified run.
+
 ## Why The Default Test Scope Is Limited
 
 `pytest.ini` intentionally limits discovery to:
@@ -57,12 +82,11 @@ Without that scoping, a normal `pytest` run tries to execute unrelated vendored 
 
 ## About The Bigger Pipeline
 
-These files are still present:
+These files are still present for the advanced Redis-backed orchestration path:
 
 - `run_pipeline_demo.py`
 - `worker_runner.py`
 - `manager_runner.py`
-- `gui_app.py`
 
 They are better treated as advanced demos than as the default test story. They may require:
 
@@ -72,7 +96,7 @@ They are better treated as advanced demos than as the default test story. They m
 - COLMAP
 - extra GPU-heavy dependencies
 
-If you only want to verify that the repo can author OpenUSD output locally, the smoke test is the right tool.
+If you only want to verify that the repo can author OpenUSD output locally, the smoke test is the right tool. If you want to verify the app, use `demo_launcher.py --headless`.
 
 ## Troubleshooting
 

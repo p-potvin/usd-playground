@@ -1,11 +1,14 @@
 # usd-playground
 
-`usd-playground` is an experimental OpenUSD sandbox for digital-twin ideas.
+`usd-playground` is a local-first OpenUSD desktop app for turning a room video into a resumable digital-twin job with generated USD, camera previews, a walkthrough video, and optional VaultWares workflow export.
 
-If you are just trying to answer, "Does this repo work on my machine?", start with the smoke test. It is the only workflow in this repo that is currently verified end-to-end in a normal local setup, and it produces a real `.usda` file you can inspect.
+If you are just trying to answer, "Does this repo work on my machine?", start with the smoke test. It produces a real `.usda` file you can inspect. If you want the working app, run the desktop studio.
 
 ## What You Can Run Today
 
+- `python gui_app.py` opens the desktop Digital Twin Studio app.
+- The app creates and resumes jobs under `data/jobs/`.
+- The full app run writes a manifest, extracted frames, USD stage, camera previews, and walkthrough MP4.
 - `pytest` runs the repo's supported tests.
 - The smoke test writes `data/test_outputs/smoke_scene.usda`.
 - `python usd_smoke.py` generates the same USD artifact without pytest.
@@ -18,7 +21,7 @@ If you are just trying to answer, "Does this repo work on my machine?", start wi
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install usd-core pytest redis
+python -m pip install usd-core pytest redis PySide6 PySide6-Fluent-Widgets Pillow
 python -m pytest -s
 ```
 
@@ -28,7 +31,7 @@ python -m pytest -s
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install usd-core pytest redis
+python -m pip install usd-core pytest redis PySide6 PySide6-Fluent-Widgets Pillow
 python -m pytest -s
 ```
 
@@ -48,6 +51,39 @@ You can also generate it directly:
 
 ```powershell
 .\.venv\Scripts\python.exe .\usd_smoke.py
+```
+
+## Run The Desktop App
+
+The main app entrypoint is:
+
+```powershell
+.\.venv\Scripts\python.exe .\gui_app.py
+```
+
+The app workflow is:
+
+1. choose a video, or use the bundled room video
+2. click `Run Full Job`
+3. inspect each stage from the step rail
+4. open the output folder, USD artifacts, or walkthrough video
+5. use `Open Latest Job` or `Open Job Manifest` to resume previous work
+
+Jobs are stored under:
+
+- `data/jobs/<job-id>/manifest.json`
+- `data/jobs/<job-id>/frames/`
+- `data/jobs/<job-id>/reconstruction/`
+- `data/jobs/<job-id>/usd/`
+- `data/jobs/<job-id>/camera_previews/`
+- `data/jobs/<job-id>/deliverables/`
+
+The normal app mode is fallback-safe. If Nerfstudio or COLMAP is missing, the reconstruction stage writes deterministic placeholder-safe USD/PLY artifacts so the rest of the job can still complete. Enable strict mode in Settings when you want missing heavy tools to fail the stage.
+
+For a non-UI app verification run:
+
+```powershell
+.\.venv\Scripts\python.exe .\demo_launcher.py --headless
 ```
 
 ## What `pytest` Actually Covers
@@ -73,7 +109,7 @@ The repo also contains an agent-driven pipeline:
 - `manager_runner.py`
 - `run_pipeline_demo.py`
 
-That flow is still an advanced/demo path. It depends on extra tooling such as Redis, ffmpeg, Nerfstudio/COLMAP, and the vendored `vaultwares_agentciation` framework. It is not the path I would point an everyday user to first.
+That flow is now the legacy advanced orchestration path. It depends on extra tooling such as Redis, ffmpeg, Nerfstudio/COLMAP, and the vendored `vaultwares_agentciation` framework. The everyday app path is `gui_app.py`, which uses `studio_core` directly and does not require Redis.
 
 The smoke test is the reliable starting point because it proves all of the following with minimal setup:
 
@@ -162,16 +198,6 @@ Important detail:
 - if `ns-process-data` / COLMAP is available, the reconstruction agent uses it
 - if it is missing or fails, the agent creates a placeholder `data/reconstruction/cloud.usda` so the demo can still finish and emit `data/digital_twin_scene.usda`
 
-### Optional GUI
-
-There is also a GUI entrypoint:
-
-```powershell
-.\.venv\Scripts\python.exe .\gui_app.py
-```
-
-That GUI still depends on Redis and the worker processes being available.
-
 ## Single Launcher And `.exe`
 
 If you do not want separate worker, manager, and orchestrator terminals, use the single launcher:
@@ -182,12 +208,12 @@ If you do not want separate worker, manager, and orchestrator terminals, use the
 
 What it does:
 
-- runs the three demo stages in one local process
-- extracts frames from `test_input.mp4`
+- runs the local pipeline in one process
+- extracts frames from the selected source video
 - attempts Nerfstudio/COLMAP reconstruction when available
 - falls back to a placeholder reconstruction when those tools are missing
 - composes the final USD stage
-- writes outputs under `data/`
+- writes outputs under `data/jobs/`
 
 For a non-UI verification run:
 

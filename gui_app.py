@@ -18,31 +18,86 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMainWindow,
     QProgressBar,
     QPushButton,
     QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel
-from qfluentwidgets import FluentIcon as FIF
-from qfluentwidgets import (
-    FluentWindow,
-    NavigationItemPosition,
-    PrimaryPushButton,
-    SubtitleLabel,
-    TextEdit,
-    Theme,
-    setTheme,
-)
+try:
+    from qfluentwidgets import BodyLabel
+    from qfluentwidgets import FluentIcon as FIF
+    from qfluentwidgets import (
+        FluentWindow,
+        NavigationItemPosition,
+        PrimaryPushButton,
+        SubtitleLabel,
+        TextEdit,
+        Theme,
+        setTheme,
+    )
+except ImportError:
+    from PySide6.QtWidgets import QTextEdit as TextEdit
+
+    class _FallbackIcon:
+        ACCEPT = None
+        APPLICATION = None
+        FOLDER = None
+        HOME = None
+        LINK = None
+        PLAY = None
+        PLAY_SOLID = None
+        SAVE = None
+        SETTING = None
+        SYNC = None
+        VIDEO = None
+
+    class _FallbackNavigationItemPosition:
+        BOTTOM = None
+
+    class _FallbackTheme:
+        LIGHT = None
+
+    class BodyLabel(QLabel):
+        pass
+
+    class SubtitleLabel(QLabel):
+        pass
+
+    class PrimaryPushButton(QPushButton):
+        def __init__(self, _icon=None, text: str = "", parent: QWidget | None = None):
+            super().__init__(text, parent)
+
+    class FluentWindow(QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self._tabs = QTabWidget(self)
+            self.setCentralWidget(self._tabs)
+
+        def addSubInterface(self, widget: QWidget, _icon, text: str, _position=None) -> None:
+            self._tabs.addTab(widget, text)
+
+    def setTheme(_theme) -> None:
+        return None
+
+    FIF = _FallbackIcon()
+    NavigationItemPosition = _FallbackNavigationItemPosition()
+    Theme = _FallbackTheme()
 from studio_core.pipeline import (
     DEFAULT_CAMERA_PROMPT,
     DEFAULT_SOURCE_VIDEO,
+    JOBS_DIR,
     DigitalTwinStudioRunner,
     JobManifest,
     StageState,
     build_dependency_health,
     create_job_manifest,
+    load_job_manifest,
+    load_latest_job_manifest,
+    next_incomplete_stage_key,
+    stage_dependencies_complete,
 )
 from studio_core.integration import (
     VaultFlowsConnectionSettings,
@@ -54,30 +109,40 @@ from studio_core.viewer import open_live_viewer
 
 ROOT = Path(__file__).resolve().parent
 ICON_PATH = ROOT / "icon.png"
+VAULT_COLORS = {
+    "paper": "#FDFCF7",
+    "paper_alt": "#F7F5EA",
+    "surface": "#FDFDFD",
+    "border": "#D6D2C4",
+    "cyan": "#21B8CC",
+    "deep_blue": "#0A2540",
+    "muted": "#586E75",
+    "ink": "#002B36",
+}
 CARD_STYLE = """
 QFrame {
-    background: #fdfdf6;
-    border: 1px solid #d6d2c4;
-    border-radius: 18px;
+    background: %s;
+    border: 1px solid %s;
+    border-radius: 8px;
 }
-"""
+""" % (VAULT_COLORS["paper"], VAULT_COLORS["border"])
 ACCENT_CARD_STYLE = """
 QFrame {
-    background: #f7f5ea;
-    border: 1px solid #006994;
-    border-radius: 18px;
+    background: %s;
+    border: 1px solid %s;
+    border-radius: 8px;
 }
-"""
+""" % (VAULT_COLORS["paper_alt"], VAULT_COLORS["cyan"])
 PREVIEW_STYLE = """
 QLabel {
-    background: #ebe6d6;
-    color: #222222;
-    border: 1px dashed #8c8a84;
-    border-radius: 14px;
+    background: %s;
+    color: %s;
+    border: 1px dashed %s;
+    border-radius: 8px;
     min-height: 120px;
     padding: 12px;
 }
-"""
+""" % (VAULT_COLORS["surface"], VAULT_COLORS["ink"], VAULT_COLORS["muted"])
 STATE_LABELS = {
     StageState.QUEUED.value: "Queued",
     StageState.RUNNING.value: "Running",
@@ -191,11 +256,15 @@ class DashboardWidget(QFrame):
         self.source_video_label.setWordWrap(True)
         self.pick_video_btn = PrimaryPushButton(FIF.FOLDER, "Choose Video", job_card)
         self.use_demo_btn = PrimaryPushButton(FIF.VIDEO, "Use Demo Video", job_card)
+        self.open_latest_job_btn = PrimaryPushButton(FIF.SYNC, "Open Latest Job", job_card)
+        self.open_manifest_btn = PrimaryPushButton(FIF.FOLDER, "Open Job Manifest", job_card)
         job_layout.addWidget(self.job_title)
         job_layout.addWidget(self.job_meta)
         job_layout.addWidget(self.source_video_label)
         job_layout.addWidget(self.pick_video_btn)
         job_layout.addWidget(self.use_demo_btn)
+        job_layout.addWidget(self.open_latest_job_btn)
+        job_layout.addWidget(self.open_manifest_btn)
         layout.addWidget(job_card)
 
         stages_card = QFrame(container)
@@ -211,19 +280,21 @@ class DashboardWidget(QFrame):
         actions_card.setStyleSheet(CARD_STYLE)
         actions_layout = QVBoxLayout(actions_card)
         actions_layout.setContentsMargins(18, 18, 18, 18)
+        self.run_full_job_btn = PrimaryPushButton(FIF.PLAY_SOLID, "Run Full Job", actions_card)
         self.run_stage_btn = PrimaryPushButton(FIF.PLAY, "Run Selected Step", actions_card)
-        self.run_remaining_btn = PrimaryPushButton(FIF.PLAY_SOLID, "Run Remaining Steps", actions_card)
         self.open_job_folder_btn = PrimaryPushButton(FIF.FOLDER, "Open Job Folder", actions_card)
+        actions_layout.addWidget(self.run_full_job_btn)
         actions_layout.addWidget(self.run_stage_btn)
-        actions_layout.addWidget(self.run_remaining_btn)
         actions_layout.addWidget(self.open_job_folder_btn)
         layout.addWidget(actions_card)
 
         self.pick_video_btn.clicked.connect(self._pick_video)
         self.use_demo_btn.clicked.connect(self._use_demo_video)
+        self.open_latest_job_btn.clicked.connect(self._open_latest_job)
+        self.open_manifest_btn.clicked.connect(self._open_manifest)
         self.stage_list.currentItemChanged.connect(self._on_stage_selected)
         self.run_stage_btn.clicked.connect(self._run_selected_stage)
-        self.run_remaining_btn.clicked.connect(self._run_remaining)
+        self.run_full_job_btn.clicked.connect(self._run_full_job)
         self.open_job_folder_btn.clicked.connect(lambda: _open_path(Path(self.manifest.output_dir)))
         return container
 
@@ -421,11 +492,12 @@ class DashboardWidget(QFrame):
 
     def _set_running(self, running: bool) -> None:
         self.is_running = running
-        self.run_stage_btn.setEnabled(not running)
-        self.run_remaining_btn.setEnabled(not running)
         self.pick_video_btn.setEnabled(not running)
         self.use_demo_btn.setEnabled(not running)
+        self.open_latest_job_btn.setEnabled(not running)
+        self.open_manifest_btn.setEnabled(not running)
         self.stage_list.setEnabled(not running)
+        self._sync_action_state()
 
     def _pick_video(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
@@ -439,6 +511,37 @@ class DashboardWidget(QFrame):
 
     def _use_demo_video(self) -> None:
         self._reset_job(DEFAULT_SOURCE_VIDEO)
+
+    def _open_latest_job(self) -> None:
+        manifest = load_latest_job_manifest()
+        if manifest is None:
+            self._append_log(f"No saved jobs found under {JOBS_DIR}.")
+            return
+
+        self._load_existing_job(manifest)
+
+    def _open_manifest(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open job manifest",
+            str(JOBS_DIR),
+            "Job Manifests (manifest.json);;JSON Files (*.json);;All Files (*.*)",
+        )
+        if not file_path:
+            return
+
+        self._load_existing_job(load_job_manifest(file_path))
+
+    def _load_existing_job(self, manifest: JobManifest) -> None:
+        if self.is_running:
+            return
+        self.manifest = manifest
+        self.selected_stage_key = next_incomplete_stage_key(manifest) or manifest.current_stage_key
+        self.show_finish_panel = manifest.state == StageState.COMPLETE.value
+        self.camera_prompt_edit.setText(str(manifest.metadata.get("cameraPrompt", DEFAULT_CAMERA_PROMPT)))
+        self.log_view.clear()
+        self._append_log(f"Opened job {manifest.job_id}")
+        self._render_manifest()
 
     def _reset_job(self, source_video: Path) -> None:
         if self.is_running:
@@ -464,12 +567,12 @@ class DashboardWidget(QFrame):
         self._render_manifest()
 
     def _run_selected_stage(self) -> None:
-        self._start_worker(run_remaining=False)
+        self._start_worker(run_full_job=False)
 
-    def _run_remaining(self) -> None:
-        self._start_worker(run_remaining=True)
+    def _run_full_job(self) -> None:
+        self._start_worker(run_full_job=True)
 
-    def _start_worker(self, run_remaining: bool) -> None:
+    def _start_worker(self, run_full_job: bool) -> None:
         if self.is_running:
             return
         self._save_camera_prompt()
@@ -478,8 +581,8 @@ class DashboardWidget(QFrame):
         def worker() -> None:
             try:
                 runner = DigitalTwinStudioRunner(self.manifest, self.signals.log.emit, strict_mode=self.strict_mode)
-                if run_remaining:
-                    result = runner.run_remaining(self.selected_stage_key)
+                if run_full_job:
+                    result = runner.run_remaining()
                 else:
                     result = runner.run_stage(self.selected_stage_key)
             except Exception as exc:  # noqa: BLE001
@@ -530,6 +633,7 @@ class DashboardWidget(QFrame):
         )
 
         self._render_selected_stage()
+        self._sync_action_state()
 
     def _render_selected_stage(self) -> None:
         if self.manifest.state == StageState.COMPLETE.value and self.show_finish_panel:
@@ -540,7 +644,10 @@ class DashboardWidget(QFrame):
         self.viewer_stack.setCurrentWidget(self.step_page)
         self.step_title.setText(stage.title)
         self.step_description.setText(stage.description)
-        self.step_message.setText(stage.message or "This stage has not started yet.")
+        if not stage_dependencies_complete(self.manifest, stage.key):
+            self.step_message.setText("Complete earlier stages first, or use Run Full Job.")
+        else:
+            self.step_message.setText(stage.message or "This stage has not started yet.")
 
         show_prompt = stage.key == "usd_cameras"
         self.camera_prompt_card.setVisible(show_prompt)
@@ -567,6 +674,13 @@ class DashboardWidget(QFrame):
             button = QPushButton(artifact.label, self)
             button.clicked.connect(lambda _checked=False, artifact_path=artifact.path: _open_path(Path(artifact_path)))
             self.artifact_buttons_layout.addWidget(button)
+
+    def _sync_action_state(self) -> None:
+        has_remaining_work = next_incomplete_stage_key(self.manifest) is not None
+        selected_stage = next(stage for stage in self.manifest.stages if stage.key == self.selected_stage_key)
+        selected_ready = stage_dependencies_complete(self.manifest, selected_stage.key)
+        self.run_full_job_btn.setEnabled((not self.is_running) and has_remaining_work)
+        self.run_stage_btn.setEnabled((not self.is_running) and selected_ready)
 
     def _show_finish_panel(self) -> None:
         self.show_finish_panel = True
