@@ -53,9 +53,18 @@ def main() -> int:
     runner = DigitalTwinStudioRunner(manifest, log, strict_mode=True, remote_runner=remote_runner)
     runner.run_stage("reconstruction")
 
-    splat_path = runner.recon_dir / "splat.ply"
+    # The raw export lands in gsplat_export/; recon_dir holds the converted
+    # viewer artifacts. Checking recon_dir/splat.ply reports a false negative
+    # on a perfectly good run, so report what the pipeline actually produces.
     summary_path = runner.recon_dir / "summary.json"
-    print(f"[retry] splat.ply exists: {splat_path.exists()}", "size:", splat_path.stat().st_size if splat_path.exists() else "n/a")
+    for label, path in (
+        ("splat.ply", runner.recon_dir / "gsplat_export" / "splat.ply"),
+        ("cloud.ply", runner.recon_ply_path),
+        ("cloud.splat", runner.recon_splat_path),
+        ("cloud_preview.ply", runner.recon_preview_ply_path),
+    ):
+        size = f"{path.stat().st_size / 1024 / 1024:.1f} MB" if path.exists() else "MISSING"
+        print(f"[retry] {label}: {size}")
     print(f"[retry] summary.json: {summary_path.read_text(encoding='utf-8') if summary_path.exists() else 'MISSING'}")
     return 0
 

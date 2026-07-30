@@ -639,13 +639,25 @@ def main() -> int:  # noqa: PLR0911, PLR0915
     if args.gs_only:
         log(f"DA3 direct 3DGS mode (model: {args.da3_model})")
         started = time.monotonic()
-        prediction = da3_inference(
-            sfm_frames,
-            model_id=args.da3_model,
-            infer_gs=True,
-            export_dir=out_dir,
-            export_format="gs_ply",
-        )
+        prediction = None
+        try:
+            prediction = da3_inference(
+                sfm_frames,
+                model_id=args.da3_model,
+                infer_gs=True,
+                export_dir=out_dir,
+                export_format="gs_ply",
+            )
+        except Exception as exc:  # noqa: BLE001
+            # DA3's exporter writes the PLY and then renders a preview video.
+            # The video step calls moviepy with an fps we never supply and dies
+            # on `TypeError: must be real number, not NoneType` — after the PLY
+            # is already on disk. Losing a completed 4.5M-gaussian run over a
+            # preview clip we don't want would be absurd, so only treat this as
+            # fatal if nothing was actually written.
+            if not list(out_dir.rglob("*.ply")):
+                return fail(out_dir, "da3_inference_failed", str(exc))
+            log(f"DA3 export raised after writing the PLY, continuing: {exc}")
         timings["da3_inference_s"] = round(time.monotonic() - started, 1)
 
         # Try to find the gs_ply exported by DA3's export pipeline
@@ -654,6 +666,11 @@ def main() -> int:  # noqa: PLR0911, PLR0915
             shutil.copyfile(gs_ply_candidates[0], out_dir / "da3_gaussians.ply")
             shutil.copyfile(gs_ply_candidates[0], out_dir / "splat.ply")
             log(f"DA3 gs_ply exported to {out_dir / 'splat.ply'}")
+        elif prediction is None:
+            # Unreachable in practice — the guard above already failed out when
+            # the exporter raised with no PLY written. Explicit so a future edit
+            # to that guard can't silently reach export_da3_gs_ply(None).
+            return fail(out_dir, "gs_export_failed", "DA3 export produced no PLY")
         else:
             # Fallback: export from prediction.aux['gaussians']
             try:

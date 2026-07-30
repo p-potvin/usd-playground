@@ -1,20 +1,22 @@
 <!-- v1.0.0 -->
 # DA3 Direct-3DGS (`--gs-only`) — Why It Never Ran, and What It Took to Fix
 
-> **Thu, 30 Jul 2026 12:13 PM EDT** — Investigation into why the `da3-draft` and
-> `da3-incremental` presets had never produced output. Companion to
-> `da3-standard-benchmark-20260713.md`, which covers the path that *did* work.
-> Formatted for both human and agent consumption.
+> **Thu, 30 Jul 2026 5:05 PM EDT** — Investigation into why the `da3-draft` and
+> `da3-incremental` presets had never produced output, through to the first
+> green run. Companion to `da3-standard-benchmark-20260713.md`, which covers the
+> pose+depth path. Formatted for both human and agent consumption.
 
 ---
 
 ## Summary
 
-`da3-draft` (DA3-GIANT with `infer_gs=True`, no splatfacto training) had **never
-run successfully a single time** since it was written. Not "crashed repeatedly" —
-never executed. Three independent failures were stacked on top of each other,
-each one hidden by the layer above it, and each only reachable after fixing the
-previous one.
+**Status: RESOLVED.** `da3-draft` now completes end-to-end — 4,503,479 gaussians
+in 76 s for ~$0.02.
+
+It had **never run successfully a single time** since it was written. Not
+"crashed repeatedly" — never executed. Five independent failures were stacked on
+top of each other, each hidden by the one above it, each only reachable after
+fixing the previous one.
 
 | Layer | Failure | Hidden by |
 |---|---|---|
@@ -22,11 +24,23 @@ previous one.
 | 2 | No `nvcc` in the base image | Layer 1's silent fallback |
 | 2b | No `wheel` / `ninja` → `invalid command 'bdist_wheel'` | Only surfaced once layer 2 was fixed |
 | 3 | `e3nn` unimportable → `NameError` mid-inference | DA3's own bare `try/except` |
+| 4 | CUDA OOM in the Gaussian head | Only reachable once layer 3 was fixed |
+| 5 | Exporter renders a preview video and dies on `fps=None` | Treated as fatal despite the PLY already being written |
 
 `da3-standard` and `da3-high` were never affected — they use DA3 for pose+depth
 only and never touch the Gaussian head, so none of these paths execute.
 
-**Total cost to find all of it: $0.03** (one 152-second GPU job).
+**Total cost to find and fix all of it: ~$0.09** across five GPU jobs, the
+longest of which ran 152 seconds.
+
+### The shape of this bug
+
+Every layer here failed *silently or misleadingly*. A Dockerfile `|| echo`, a
+base image quietly lacking a compiler, a dependency's bare `except` converting an
+`ImportError` into a `NameError` three frames away, and finally a completed 4.5M
+gaussian run being discarded because a preview clip we never asked for couldn't
+find an fps. None of it was reachable by reading code — each layer only became
+visible by running the thing and reading what actually came back.
 
 ---
 
@@ -180,22 +194,117 @@ container-specific.
 
 ---
 
-## The diagnostic job
+## Layer 4 — CUDA OOM in the Gaussian head
+
+With e3nn fixed, inference ran deep into the Gaussian head and then:
+
+```
+torch.cuda.OutOfMemoryError: Tried to allocate 552.00 MiB.
+GPU 0 has a total capacty of 14.74 GiB of which 558.19 MiB is free.
+  depth_anything_3/model/gsdpt.py line 109, in _forward_impl
+    fused = fused + self.images_merger(images)
+```
+
+Self-inflicted. `t4-small` (16 GB) had been chosen on the reasoning that
+DA3-GIANT's 5.4 GB of weights don't need an L4's 22 GB — **wrong axis**. Peak
+memory is activations, not weights, and `infer_gs=True` stacks a Gaussian head
+on top of multi-view attention that the entrypoint's own comment already
+describes as OOM-prone above ~100 frames on 22 GB.
+
+Two changes, since either alone was marginal:
+
+| Change | Rationale |
+|---|---|
+| `sfm_flavor=["a10g-small", "l4x1"]` | 24 GB floor; t4 dropped entirely |
+| `da3_max_sfm_frames=40` | Halved from the pose+depth default |
+
+`--max-sfm-frames` already existed in the entrypoint but **`reconstruction.py`
+never passed it**, so every run silently used the default 80 that was tuned for
+SfM *without* the Gaussian head. It is now a preset field. `da3-standard` keeps
+80 — the change is scoped to the direct-3DGS presets.
+
+---
+
+## Layer 5 — a preview video killing a successful run
+
+40 frames on 24 GB cleared the OOM, inference completed, and the job still
+reported ERROR:
+
+```
+File ".../depth_anything_3/utils/export/gs.py", line 147, in export_to_gs_video
+  clip.write_videofile(
+...
+TypeError: must be real number, not NoneType
+```
+
+Buried in the same log: `[vw-stage] outputs uploaded`. DA3's exporter writes the
+PLY **and then** renders a preview video; the video step calls moviepy with an
+fps we never supply. The 306 MB / 4.5M gaussian PLY was already on disk. The run
+had succeeded and was being thrown away over a clip nobody wanted.
+
+**Fix:** treat the export as non-fatal when a PLY landed.
+
+```python
+try:
+    prediction = da3_inference(..., export_dir=out_dir, export_format="gs_ply")
+except Exception as exc:
+    if not list(out_dir.rglob("*.ply")):
+        return fail(out_dir, "da3_inference_failed", str(exc))
+    log(f"DA3 export raised after writing the PLY, continuing: {exc}")
+```
+
+> Note: in the *installed* DA3 build (the layer is cached from before upstream
+> `main` moved), `export_format="gs_ply"` reaches `export_to_gs_video` as well as
+> `export_to_gs_ply`. Not worth further archaeology — tolerating the exporter is
+> more robust than depending on its dispatch, and removes moviepy from the
+> critical path.
+
+---
+
+## The green run
 
 | Metric | Value |
 |---|---|
-| Job ID | `6a6b65ef23ed89c748ec7c94` |
-| Flavor | `l4x1` |
-| Duration | 151.7 s |
-| **Actual cost** | **$0.03** |
-| Outcome | ERROR — `NameError: matrix_to_angles` |
-| Frames | 500 extracted → 80 subsampled for DA3 |
-| Model | `depth-anything/DA3-GIANT-1.1` (5.42 GB) |
+| Job ID | `6a6bb9c3b36a6516e96a32f0` |
+| Flavor | `a10g-small` |
+| **Wall time** | **76 s** |
+| DA3 inference | 73.7 s |
+| **Cost** | **~$0.02** |
+| Frames | 500 extracted → 40 for DA3 |
+| **Gaussians** | **4,503,479** |
+| Gravity alignment | 25.1° to +Y |
 
-It reached DA3 inference, loaded a 5.4 GB model, and failed on the very last
-step before producing gaussians. Cheapest possible way to learn all of that —
-and none of it was reachable from static inspection, because the bug lives in a
-dependency's exception handler.
+Artifacts: `splat.ply` 306 MB, `cloud.ply` 252 MB, `cloud.splat` 144 MB,
+`cloud_preview.ply` 3 MB, `cloud.usda` 990 MB.
+
+### Quality, honestly
+
+Structurally correct and clearly the right scene — paths, beds and foliage all
+read — but **soft**, nothing like the crisp geometry of trained splatfacto. That
+is inherent, not a bug: this is a feed-forward prediction with zero per-scene
+optimisation.
+
+| | `da3-standard` | `da3-draft` |
+|---|---|---|
+| Gaussians | 1.84M | 4.5M |
+| Wall time | ~35 min | ~76 s |
+| Cost | $0.36 | ~$0.02 |
+| Quality | sharp | soft, structurally correct |
+
+Which is exactly the tradeoff the preset advertises. Use it for preview and
+layout planning; use `da3-standard` when the geometry has to hold up.
+
+### Two data-quality issues worth fixing
+
+1. **`opacity` max is `inf`.** Harmless through a sigmoid when rendering, but any
+   `mean`/`sum` over opacity yields `nan` — which `gaussian_merge.py`'s quality
+   scoring does. Clamp before trusting `da3-incremental`.
+2. **Outlier tail.** 96% of gaussians sit within radius 1.58 while the full bbox
+   is ±600, and skewness came out at 32.7 (vs 1.07 on the trained run). This
+   defeats the viewer's auto-framing — the screenshots for this doc had to be
+   framed off the interquartile core. A percentile clip in
+   `convert_splat_outputs` would fix framing for every DA3 draft, and would
+   probably improve the gravity-alignment estimate too.
 
 ---
 
@@ -294,17 +403,20 @@ Covered by `tests/test_flavor_fallback.py` (6 tests, fully faked hub).
 | Item | Status |
 |---|---|
 | `clopeux/vw-studio-da3-gs` image | ✅ Builds; `gsplat OK: 1.5.2` + `e3nn.o3 OK` |
-| `da3-draft` end-to-end | ⏳ Never completed — blocked on GPU capacity |
-| `da3-incremental` | ⏳ Untested (depends on same `--gs-only` path) |
+| `da3-draft` end-to-end | ✅ Green — 4.5M gaussians, 76 s, ~$0.02 |
+| Flavor fallback success path | ✅ Verified by the green run (`a10g-small`) |
+| `da3-incremental` | ⏳ Untested — shares the fixed `--gs-only` path, but the ICP merge itself has never run |
 | `da3-standard` / `da3-high` | ✅ Unaffected, still on proven `vw-studio-da3` |
 | Local Windows gsplat build | ❌ Abandoned (MSVC/CUDA STL assert) |
 
-`da3-draft` and `da3-incremental` point at `vw-studio-da3-gs` via
-`sfm_image_override` so the proven `vw-studio-da3` image is untouched. **Repoint
-them at `vw-studio-da3` once a green run exists** — the two Spaces then differ
-only in the nvcc/e3nn additions, which are safe for the pose+depth presets too.
+`da3-draft` and `da3-incremental` still point at `vw-studio-da3-gs` via
+`sfm_image_override`. Now that a green run exists, **repoint them at
+`vw-studio-da3`** — the two Spaces differ only in the nvcc/wheel/e3nn additions,
+all of which are safe for the pose+depth presets too. Left as a deliberate
+follow-up rather than done blind, since it means rebuilding the image the proven
+`da3-standard` path depends on.
 
-To resume: `.venv\Scripts\python.exe tools\retry_da3_draft_recon.py local-run-20260730-105436`
+To re-run: `.venv\Scripts\python.exe tools\retry_da3_draft_recon.py local-run-20260730-105436`
 (frames already extracted; reruns the reconstruction stage only).
 
 ---
@@ -314,13 +426,24 @@ To resume: `.venv\Scripts\python.exe tools\retry_da3_draft_recon.py local-run-20
 ```yaml
 investigation: da3-direct-3dgs-gs-only
 date: 2026-07-30
-status: BLOCKED_ON_GPU_CAPACITY
+status: RESOLVED
 preset_affected: [da3-draft, da3-incremental]
 preset_unaffected: [da3-standard, da3-high]
 never_ran_before: true
-diagnostic_cost_usd: 0.03
-diagnostic_job_id: 6a6b65ef23ed89c748ec7c94
-diagnostic_duration_s: 151.7
+total_debug_cost_usd: 0.09
+jobs_burned: 5
+
+green_run:
+  job_id: 6a6bb9c3b36a6516e96a32f0
+  flavor: a10g-small
+  wall_time_s: 76
+  da3_inference_s: 73.7
+  cost_usd: 0.02
+  gaussians: 4503479
+  frames_extracted: 500
+  frames_to_da3: 40
+  gravity_rotation_deg: 25.1
+  artifacts: [splat.ply, cloud.ply, cloud.splat, cloud_preview.ply, cloud.usda]
 
 root_causes:
   - layer: 1
@@ -335,6 +458,12 @@ root_causes:
   - layer: 3
     what: "e3nn unimportable (missing opt_einsum_fx + scipy from --no-deps); DA3 swallows the ImportError in a bare try/except, surfacing as NameError: matrix_to_angles inside rotate_sh()"
     fix: "pip install opt_einsum_fx scipy; assert `from e3nn.o3 import matrix_to_angles, wigner_D`"
+  - layer: 4
+    what: "CUDA OOM in the Gaussian head on t4-small (16GB) at 80 frames; flavor was chosen from model weight size rather than activation peak"
+    fix: "24GB floor (a10g-small, l4x1) + da3_max_sfm_frames=40; --max-sfm-frames existed but reconstruction.py never passed it"
+  - layer: 5
+    what: "DA3's exporter writes the PLY then renders a preview video, dying on moviepy fps=None; entrypoint treated the whole inference call as fatal and discarded a completed 4.5M gaussian run"
+    fix: "export failure is non-fatal when a PLY was written"
 
 image: hf.co/spaces/clopeux/vw-studio-da3-gs
 gsplat_version: 1.5.2
@@ -346,11 +475,23 @@ da3_model_size_gb: 5.42
 
 zerogpu_available_for_jobs: false
 flavor_fallback_added: true
-flavor_fallback_default: [t4-small, a10g-small]
-flavor_fallback_success_path_verified: false
+flavor_fallback_default: [a10g-small, l4x1]
+flavor_fallback_success_path_verified: true
+
+known_issues:
+  - "opacity max is +inf; sigmoid-safe for rendering but nan-poisons any mean/sum, incl. gaussian_merge quality scoring"
+  - "outlier tail: 96% of gaussians within radius 1.58 but bbox +/-600, skewness 32.7 vs 1.07 trained; breaks viewer auto-framing"
+
+quality_vs_trained:
+  da3_draft:    {gaussians: 4503479, wall_time_s: 76,   cost_usd: 0.02, sharpness: soft}
+  da3_standard: {gaussians: 1839412, wall_time_s: 2100, cost_usd: 0.36, sharpness: sharp}
 
 local_windows_build: abandoned
 local_windows_blocker: "MSVC 14.51 yvals_core.h STL1002 static_assert requires CUDA 13.2+; -allow-unsupported-compiler does not bypass it"
 
-resume_command: "tools/retry_da3_draft_recon.py local-run-20260730-105436"
+next_steps:
+  - "repoint da3-draft/da3-incremental at vw-studio-da3 (drop the -gs override in presets.py)"
+  - "clamp opacity before da3-incremental is trusted"
+  - "percentile clip in convert_splat_outputs to fix framing + gravity estimate"
+  - "da3-incremental still untested end-to-end"
 ```

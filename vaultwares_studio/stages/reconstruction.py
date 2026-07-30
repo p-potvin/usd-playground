@@ -182,6 +182,7 @@ def _run_da3_direct_gs(
         "python", "/opt/vw/da3_entrypoint.py",
         "--gs-only",
         "--da3-model", preset.da3_model,
+        "--max-sfm-frames", str(preset.da3_max_sfm_frames),
     ]
 
     da3_image = _resolve_da3_image(ctx, preset, prep)

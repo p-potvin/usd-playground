@@ -78,6 +78,11 @@ class QualityPreset:
     # and skips splatfacto training entirely. Only works with DA3-GIANT or
     # DA3NESTED models that have the Gaussian head.
     da3_direct_gs: bool = False
+    # Frames handed to DA3 inference (evenly subsampled). The entrypoint's own
+    # default of 80 was tuned for pose+depth on a 22GB L4; infer_gs=True stacks
+    # a Gaussian head on top of the already-quadratic multi-view attention and
+    # needs materially more. Lowered for the direct-3DGS presets.
+    da3_max_sfm_frames: int = 80
 
     def train_args(self) -> list[str]:
         """splatfacto arguments shared by local and remote execution."""
@@ -259,11 +264,17 @@ PRESETS: dict[str, QualityPreset] = {
         sfm_method=SfmMethod.DA3,
         da3_model="depth-anything/DA3-GIANT-1.1",
         da3_direct_gs=True,
-        # DA3-GIANT is ~5.4GB — doesn't need l4x1's 22GB. t4-small first
-        # (cheapest, $0.40/hr), falling back to a10g-small ($1.00/hr) if t4
-        # capacity is tight. Found 2026-07-30: l4x1 spot capacity can leave a
-        # job in SCHEDULING indefinitely; see HfJobsStageRunner.run.
-        sfm_flavor=["t4-small", "a10g-small"],
+        # 24GB-class cards only. t4-small (16GB) was tried first on 2026-07-30
+        # on the reasoning that DA3-GIANT's 5.4GB of weights don't need an L4 —
+        # wrong axis: peak memory is activations, not weights, and the Gaussian
+        # head OOM'd at 13.90GB allocated with 80 frames. Both entries below are
+        # 24GB; a10g-small leads because l4x1 spot capacity is the least
+        # reliable of the two (20+ min in SCHEDULING, same day).
+        sfm_flavor=["a10g-small", "l4x1"],
+        # Halved from the 80 that the pose+depth path uses. This is a draft
+        # preview preset — 40 views is plenty — and it buys real headroom
+        # against the quadratic attention on top of the Gaussian head.
+        da3_max_sfm_frames=40,
         sfm_est_minutes=5,
         sfm_timeout_seconds=1_800,  # 30 min ceiling
         sfm_image_override="hf.co/spaces/{owner}/vw-studio-da3-gs",
@@ -328,8 +339,10 @@ PRESETS: dict[str, QualityPreset] = {
         sfm_method=SfmMethod.DA3,
         da3_model="depth-anything/DA3-GIANT-1.1",
         da3_direct_gs=True,
-        # Same DA3-GIANT model as da3-draft — same flavor-fallback rationale.
-        sfm_flavor=["t4-small", "a10g-small"],
+        # Same DA3-GIANT + Gaussian head as da3-draft — same 24GB floor and
+        # same frame cap. See da3-draft above for the OOM that established it.
+        sfm_flavor=["a10g-small", "l4x1"],
+        da3_max_sfm_frames=40,
         sfm_est_minutes=5,
         sfm_timeout_seconds=1_800,
         sfm_image_override="hf.co/spaces/{owner}/vw-studio-da3-gs",
