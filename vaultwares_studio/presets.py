@@ -18,8 +18,20 @@ only. This eliminates paying L4 rates ($0.80/hr) for CPU-only COLMAP work.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 
 from .runners import CostEstimate, RATE_TABLE_SOURCE, estimate_cost
+
+
+class SfmMethod(str, Enum):
+    COLMAP = "colmap"
+    MAST3R = "mast3r"
+    DA3 = "da3"
+
+
+def _flavor_label(flavor: str | list[str]) -> str:
+    """Display form of a flavor or fallback list, e.g. 't4-small|a10g-small'."""
+    return flavor if isinstance(flavor, str) else "|".join(flavor)
 
 
 @dataclass(frozen=True)
@@ -40,7 +52,10 @@ class QualityPreset:
     # When True, sfm_flavor and sfm_est_minutes define the first job; the
     # existing flavor/est_minutes apply only to the training job.
     split_jobs: bool = False
-    sfm_flavor: str = "cpu-upgrade"
+    # A single flavor, or a fallback list tried in order when the first
+    # candidate won't leave HF Jobs' SCHEDULING state within a timeout (spot
+    # GPU availability, esp. l4x1, fluctuates). See HfJobsStageRunner.run.
+    sfm_flavor: str | list[str] = "cpu-upgrade"
     sfm_est_minutes: float = 0.0  # 0 = not split
     # Lab-mode toggles: skip ffmpeg sharpness pruning and hard-cap the post-
     # extract frame count. Used by the cpu-upgrade experiment Space to send
@@ -54,6 +69,15 @@ class QualityPreset:
     # worker_image. Lab presets point this at the experimental Space so prod is
     # never touched.
     sfm_image_override: str = ""
+    # SfM engine: colmap (default), mast3r, or da3 (Depth Anything 3).
+    # Controls which entrypoint the SfM leg invokes.
+    sfm_method: SfmMethod = SfmMethod.COLMAP
+    # DA3-specific: model ID on HuggingFace (depth-anything/DA3-LARGE-1.1 etc.)
+    da3_model: str = ""
+    # DA3-specific: when True, the SfM leg outputs a direct 3DGS PLY (gs_ply)
+    # and skips splatfacto training entirely. Only works with DA3-GIANT or
+    # DA3NESTED models that have the Gaussian head.
+    da3_direct_gs: bool = False
 
     def train_args(self) -> list[str]:
         """splatfacto arguments shared by local and remote execution."""
@@ -77,10 +101,10 @@ class QualityPreset:
     def cost(self) -> CostEstimate:
         """Combined cost estimate. For split presets this sums both jobs."""
         if self.split_jobs and self.sfm_est_minutes > 0:
-            sfm = estimate_cost(self.sfm_flavor, self.sfm_est_minutes)
+            sfm = self.sfm_cost()
             train = estimate_cost(self.flavor, self.est_minutes)
             return CostEstimate(
-                flavor=f"{self.sfm_flavor}+{self.flavor}",
+                flavor=f"{_flavor_label(self.sfm_flavor)}+{self.flavor}",
                 est_minutes=self.sfm_est_minutes + self.est_minutes,
                 rate_usd_per_hour=0.0,  # mixed flavors; use est_usd directly
                 est_usd=round(sfm.est_usd + train.est_usd, 2),
@@ -89,7 +113,13 @@ class QualityPreset:
         return estimate_cost(self.flavor, self.est_minutes)
 
     def sfm_cost(self) -> CostEstimate:
-        return estimate_cost(self.sfm_flavor, self.sfm_est_minutes)
+        # sfm_flavor may be a fallback list — quote against the priciest
+        # candidate so the confirm dialog never undercounts what could run.
+        candidates = self.sfm_flavor if isinstance(self.sfm_flavor, list) else [self.sfm_flavor]
+        return max(
+            (estimate_cost(f, self.sfm_est_minutes) for f in candidates),
+            key=lambda e: e.est_usd,
+        )
 
     def train_cost(self) -> CostEstimate:
         return estimate_cost(self.flavor, self.est_minutes)
@@ -177,6 +207,132 @@ PRESETS: dict[str, QualityPreset] = {
         # snapshot near the splatfacto cull boundary while keeping model.zip
         # in the 6-9 GB range on a 15k-iter run.
         steps_per_save=1500,
+    ),
+    # Experimental: MASt3R-SfM instead of COLMAP. Runs on l4x1 (SfM needs GPU
+    # for MASt3R; there is no CPU-only path). Lab image is docker/lab/Dockerfile
+    # rebuilt around pytorch+cuda12.1 with the naver/mast3r install baked in.
+    # Rationale: COLMAP starves on low-texture / grass / sky / low-parallax
+    # captures. MASt3R's matcher is learned and handles those cases. Produces
+    # a nerfstudio-format processed_min.zip (transforms.json + sparse_pc.ply)
+    # that the prod worker's --train-only path consumes unchanged.
+    "lab-mast3r-sfm": QualityPreset(
+        key="lab-mast3r-sfm",
+        label="Lab: MASt3R-SfM on l4x1, training on l4x1",
+        iterations=15_000,
+        downscale_factor=1,
+        gaussian_cap=500_000,
+        flavor="l4x1",
+        est_minutes=25,
+        split_jobs=True,
+        sfm_flavor="l4x1",  # GPU-required for MASt3R inference
+        sfm_est_minutes=45,  # ~45 min expected for 3000 frames w/ retrieval-20
+        unrestricted_frames=True,
+        frame_cap=3000,
+        sfm_timeout_seconds=10_800,  # 3h ceiling -- MASt3R is much faster than COLMAP
+        sfm_image_override="hf.co/spaces/{owner}/vw-studio-recon-lab",
+        steps_per_save=1500,
+    ),
+    # --- DA3 (Depth Anything 3) presets ---
+    # DA3 replaces COLMAP/MASt3R for SfM: a single model predicts camera poses,
+    # multi-view depth, and (with the Giant model) direct 3D Gaussians.
+    #
+    # da3-draft: DA3-GIANT direct 3DGS output — no splatfacto training at all.
+    # Produces a viewable splat in ~5 min on an L4. Quality is lower than
+    # trained splatfacto but sufficient for preview / layout planning.
+    #
+    # Points at vw-studio-da3-gs, NOT the proven vw-studio-da3 image. The
+    # --gs-only path was never actually exercised before 2026-07-29 — the
+    # gsplat CUDA extension silently failed to build (nerfstudio's base image
+    # ships no nvcc) and the Dockerfile swallowed the failure with `|| echo`.
+    # vw-studio-da3-gs adds the CUDA 11.8 devel toolchain and drops that
+    # fallback so a broken build fails loud instead of shipping a dead mode.
+    # Repoint at vw-studio-da3 once this preset has a verified green run.
+    "da3-draft": QualityPreset(
+        key="da3-draft",
+        label="DA3 Draft (direct 3DGS, no training)",
+        iterations=0,  # no splatfacto training
+        downscale_factor=1,
+        gaussian_cap=500_000,
+        flavor="l4x1",
+        est_minutes=0,  # single-job, SfM only
+        split_jobs=False,
+        sfm_method=SfmMethod.DA3,
+        da3_model="depth-anything/DA3-GIANT-1.1",
+        da3_direct_gs=True,
+        # DA3-GIANT is ~5.4GB — doesn't need l4x1's 22GB. t4-small first
+        # (cheapest, $0.40/hr), falling back to a10g-small ($1.00/hr) if t4
+        # capacity is tight. Found 2026-07-30: l4x1 spot capacity can leave a
+        # job in SCHEDULING indefinitely; see HfJobsStageRunner.run.
+        sfm_flavor=["t4-small", "a10g-small"],
+        sfm_est_minutes=5,
+        sfm_timeout_seconds=1_800,  # 30 min ceiling
+        sfm_image_override="hf.co/spaces/{owner}/vw-studio-da3-gs",
+    ),
+    # da3-standard: DA3-LARGE for pose+depth → splatfacto training.
+    # DA3-LARGE (0.35B) is fast and has no GS head, but its pose+depth are
+    # sufficient to seed splatfacto. Split: DA3 SfM on l4x1 (~10 min),
+    # splatfacto training on l4x1 (~20 min).
+    "da3-standard": QualityPreset(
+        key="da3-standard",
+        label="DA3 Standard (DA3 SfM + splatfacto)",
+        iterations=15_000,
+        downscale_factor=1,
+        gaussian_cap=500_000,
+        flavor="l4x1",
+        est_minutes=20,
+        extra_train_args=("--pipeline.model.cull-alpha-thresh", "0.05"),
+        split_jobs=True,
+        sfm_method=SfmMethod.DA3,
+        da3_model="depth-anything/DA3-LARGE-1.1",
+        da3_direct_gs=False,
+        sfm_flavor="l4x1",
+        sfm_est_minutes=10,
+        sfm_timeout_seconds=3_600,
+        sfm_image_override="hf.co/spaces/{owner}/vw-studio-da3",
+    ),
+    # da3-high: DA3-LARGE SfM + longer splatfacto training on a bigger GPU.
+    "da3-high": QualityPreset(
+        key="da3-high",
+        label="DA3 High (DA3 SfM + extended training)",
+        iterations=30_000,
+        downscale_factor=2,
+        gaussian_cap=1_500_000,
+        flavor="a10g-large",
+        est_minutes=60,
+        extra_train_args=("--pipeline.model.rasterize-mode", "antialiased"),
+        split_jobs=True,
+        sfm_method=SfmMethod.DA3,
+        da3_model="depth-anything/DA3-LARGE-1.1",
+        da3_direct_gs=False,
+        sfm_flavor="l4x1",
+        sfm_est_minutes=10,
+        sfm_timeout_seconds=3_600,
+        sfm_image_override="hf.co/spaces/{owner}/vw-studio-da3",
+    ),
+    # da3-incremental: Add new footage to an existing splat without retraining.
+    # DA3-GIANT runs on the new frames only, produces a direct 3DGS PLY, then
+    # the entrypoint merges it with the base splat.ply via ICP alignment +
+    # voxel dedup + dynamic culling. Single job, ~5 min on L4. No checkpoint
+    # needed — works from just the base splat.ply (no model.zip required).
+    #
+    # Also gs-only, so also on vw-studio-da3-gs — see da3-draft's comment.
+    "da3-incremental": QualityPreset(
+        key="da3-incremental",
+        label="DA3 Incremental (merge new footage into existing splat)",
+        iterations=0,
+        downscale_factor=1,
+        gaussian_cap=500_000,
+        flavor="l4x1",
+        est_minutes=0,
+        split_jobs=False,
+        sfm_method=SfmMethod.DA3,
+        da3_model="depth-anything/DA3-GIANT-1.1",
+        da3_direct_gs=True,
+        # Same DA3-GIANT model as da3-draft — same flavor-fallback rationale.
+        sfm_flavor=["t4-small", "a10g-small"],
+        sfm_est_minutes=5,
+        sfm_timeout_seconds=1_800,
+        sfm_image_override="hf.co/spaces/{owner}/vw-studio-da3-gs",
     ),
     # Historical local quick path: a smoke-level run that proves the toolchain
     # without tying up the local GPU. Used when no remote runner is configured.

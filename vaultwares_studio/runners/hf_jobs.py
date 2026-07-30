@@ -258,9 +258,21 @@ class HfJobsStageRunner(StageRunner):
     # -- StageRunner ---------------------------------------------------------
 
     def run(self, ctx: StageContext) -> StageResult:  # noqa: PLR0915
-        flavor = ctx.params.get("flavor", self.config.default_flavor)
+        # ctx.params["flavor"] may be a single flavor string or a list of
+        # candidates to try in order (e.g. ["t4-small", "a10g-small"]) — HF
+        # Jobs has no server-side "any of these" request, so we submit each
+        # candidate and fall back to the next if it doesn't leave SCHEDULING
+        # within flavor_scheduling_timeout_seconds. Spot GPU availability
+        # (esp. l4x1) fluctuates enough that this is worth having generally,
+        # not just for this one preset.
+        flavor_param = ctx.params.get("flavor", self.config.default_flavor)
+        flavor_candidates = flavor_param if isinstance(flavor_param, list) else [flavor_param]
         est_minutes = float(ctx.params.get("est_minutes", 30))
-        estimate = estimate_cost(flavor, est_minutes)
+        # Quote against the priciest candidate so the confirm dialog never undercounts.
+        estimate = max(
+            (estimate_cost(f, est_minutes) for f in flavor_candidates),
+            key=lambda e: e.est_usd,
+        )
 
         # Consent gate comes before any network traffic.
         if self.confirm_cost is None or not self.confirm_cost(estimate):
@@ -304,22 +316,58 @@ class HfJobsStageRunner(StageRunner):
             container_cmd = ["sh", "-lc", _SH_SHIM]
 
         timeout_seconds = int(ctx.params.get("timeout_seconds", max(900, est_minutes * 60 * 2)))
-        ctx.log(f"[hf-jobs] launching job: image={image} flavor={flavor} timeout={timeout_seconds}s")
-        job = hub.run_job(
-            image=image,
-            command=container_cmd,
-            env={
-                "VW_BOOTSTRAP": BOOTSTRAP_SOURCE,
-                "VW_STAGE_CONFIG": json.dumps(stage_config),
-            },
-            secrets={"HF_TOKEN": token},
-            flavor=flavor,
-            timeout=timeout_seconds,
-            token=token,
-        )
-        ctx.log(f"[hf-jobs] job started: {job.url}")
-        started = time.monotonic()
         poll = max(MIN_POLL_INTERVAL_SECONDS, float(self.config.poll_interval_seconds))
+        scheduling_timeout = float(ctx.params.get("flavor_scheduling_timeout_seconds", 120.0))
+
+        job = None
+        flavor = None
+        for candidate in flavor_candidates:
+            ctx.log(f"[hf-jobs] launching job: image={image} flavor={candidate} timeout={timeout_seconds}s")
+            candidate_job = hub.run_job(
+                image=image,
+                command=container_cmd,
+                env={
+                    "VW_BOOTSTRAP": BOOTSTRAP_SOURCE,
+                    "VW_STAGE_CONFIG": json.dumps(stage_config),
+                },
+                secrets={"HF_TOKEN": token},
+                flavor=candidate,
+                timeout=timeout_seconds,
+                token=token,
+            )
+            ctx.log(f"[hf-jobs] job started: {candidate_job.url}")
+            wait_started = time.monotonic()
+            left_scheduling = False
+            while True:
+                if ctx.cancel.cancelled:
+                    ctx.log("[hf-jobs] cancelling remote job…")
+                    hub.cancel_job(job_id=candidate_job.id, token=token)
+                    raise StageCancelledError(f"Remote job {candidate_job.id} cancelled.")
+                info = hub.inspect_job(job_id=candidate_job.id, token=token)
+                if info.status.stage != "SCHEDULING":
+                    left_scheduling = True
+                    break
+                if time.monotonic() - wait_started > scheduling_timeout:
+                    break
+                time.sleep(poll)
+            if left_scheduling:
+                job = candidate_job
+                flavor = candidate
+                break
+            ctx.log(
+                f"[hf-jobs] {candidate} still SCHEDULING after {scheduling_timeout:.0f}s "
+                f"({'trying next flavor' if candidate is not flavor_candidates[-1] else 'no more flavors to try'}) "
+                f"— cancelling {candidate_job.id}"
+            )
+            hub.cancel_job(job_id=candidate_job.id, token=token)
+
+        if job is None:
+            raise RuntimeError(
+                f"None of the requested flavors became available within "
+                f"{scheduling_timeout:.0f}s each: {flavor_candidates}"
+            )
+
+        started = time.monotonic()
 
         # Stream remote logs in a side thread: nerfstudio progress percentages
         # in the lines drive the GUI progress bar.

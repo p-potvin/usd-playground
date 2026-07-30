@@ -45,7 +45,7 @@ class CancelToken:
 # the authoritative price is whatever the HF invoice says.
 FLAVOR_RATES_USD_PER_HOUR: dict[str, float] = {
     "cpu-basic": 0.05,
-    "cpu-upgrade": 0.10,
+    "cpu-upgrade": 0.04,
     "t4-small": 0.40,
     "t4-medium": 0.60,
     "l4x1": 0.80,
@@ -55,6 +55,7 @@ FLAVOR_RATES_USD_PER_HOUR: dict[str, float] = {
     "a10g-largex2": 3.00,
     "a10g-largex4": 6.00,
     "a100-large": 4.00,
+    "zerogpu": 6.00,  # 6x blackwell rate; 20 min max — requires manual approval
 }
 RATE_TABLE_SOURCE = "approximate public rates, recorded 2026-06"
 

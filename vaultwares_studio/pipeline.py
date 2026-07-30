@@ -5,34 +5,17 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Callable
 
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux
-
-from .camera_director import build_camera_bundle
-from .camera_paths import (
-    CameraEntity,
-    CameraKeyframe,
-    author_usd_camera,
-    build_visit_path,
-    load_captured_entities,
-    to_nerfstudio_camera_path,
-)
-from .presets import get_preset
 from .runners import (
     CancelToken,
-    CostDeniedError,
     LocalStageRunner,
-    StageCancelledError,
-    StageContext,
     StageRunner,
 )
-from .splat_io import convert_splat_outputs, is_gaussian_ply
 
 MANIFEST_SCHEMA_VERSION = 2
 
@@ -61,7 +44,6 @@ COLMAP_CANDIDATE_PATHS = [
     for _ in [0]
     if os.environ.get("COLMAP_EXE")
 ]
-COLMAP_CANDIDATE_PATHS.append(Path(r"C:\Users\Administrator\Desktop\COLMAP\COLMAP.bat"))
 COLMAP_CANDIDATE_PATHS.append(ROOT / "tools" / "colmap" / "COLMAP.bat")
 COLMAP_CANDIDATE_PATHS.append(ROOT / "tools" / "colmap" / "bin" / "colmap.exe")
 
@@ -241,7 +223,7 @@ def _slugify(name: str) -> str:
 
 def build_dependency_health() -> list[dict[str, str]]:
     binary_deps = ["ffmpeg", "ffprobe", "colmap", "ns-process-data", "ns-train"]
-    python_deps = ["PySide6", "qfluentwidgets", "redis", "pxr", "open3d", "PIL"]
+    python_deps = ["PySide6", "qfluentwidgets", "redis", "pxr", "open3d", "PIL", "torch", "depth_anything_3"]
     rows: list[dict[str, str]] = []
 
     for dep in binary_deps:
@@ -304,7 +286,7 @@ def create_job_manifest(
         job_id=job_id,
         source_video=str(source_path),
         output_dir=str(output_dir),
-        execution_profile="RTX 3060 12GB Safe",
+        execution_profile=os.environ.get("VW_EXECUTION_PROFILE", "Auto-detect"),
         mode=mode,
         state=StageState.QUEUED.value,
         current_stage_key=stages[0].key,
@@ -505,322 +487,24 @@ class DigitalTwinStudioRunner:
         save_job_manifest(self.manifest)
 
     def _run_video_intake(self, stage: StageRecord) -> None:
-        source_video = Path(self.manifest.source_video)
-        if not source_video.exists():
-            raise FileNotFoundError(f"Missing source video: {source_video}")
-        metadata = {
-            "sourceVideo": str(source_video),
-            "fileSizeBytes": source_video.stat().st_size,
-            "executionProfile": self.manifest.execution_profile,
-            "mode": self.manifest.mode,
-        }
-        ffprobe = shutil.which("ffprobe")
-        if ffprobe:
-            cmd = [
-                ffprobe,
-                "-v",
-                "error",
-                "-print_format",
-                "json",
-                "-show_streams",
-                "-show_format",
-                str(source_video),
-            ]
-            completed = subprocess.run(cmd, check=False, capture_output=True, text=True)
-            if completed.returncode == 0 and completed.stdout:
-                metadata["probe"] = json.loads(completed.stdout)
-        metadata_path = self.root / "input_metadata.json"
-        metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        stage.metadata = metadata
-        stage.message = "Video metadata captured and job initialized."
-        self._add_artifact(stage, "Input Metadata", "json", metadata_path, "Video intake metadata.")
+        from .stages import video_intake
+        video_intake.run(self, stage)
 
     def _run_frame_extraction(self, stage: StageRecord) -> None:
-        ffmpeg = resolve_binary("ffmpeg")
-        if ffmpeg is None:
-            stage.state = StageState.NEEDS_INSTALL.value
-            stage.message = DEPENDENCY_INSTALL_HINTS["ffmpeg"]
-            save_job_manifest(self.manifest)
-            raise RuntimeError("ffmpeg is required for frame extraction.")
-        self.frames_dir.mkdir(parents=True, exist_ok=True)
-        for stale in list_frames(self.frames_dir):
-            stale.unlink(missing_ok=True)
-        duration = None
-        intake = self.stage_for("video_intake")
-        try:
-            duration = float(intake.metadata["probe"]["format"]["duration"])
-        except (KeyError, TypeError, ValueError):
-            pass
-        # Lab-mode override: aim for preset.frame_cap (no sharpness prune
-        # afterwards). Production path keeps the FRAME_EXTRACT_TARGET +
-        # FRAME_KEEP_TARGET (sharpest-N) behaviour.
-        preset = get_preset(self.manifest.metadata.get("preset"))
-        if preset.unrestricted_frames and preset.frame_cap > 0:
-            extract_target = preset.frame_cap
-            keep_target = preset.frame_cap
-        else:
-            extract_target = FRAME_EXTRACT_TARGET
-            keep_target = FRAME_KEEP_TARGET
-        fps = compute_extraction_fps(duration, target_frames=extract_target)
-        if preset.unrestricted_frames:
-            self.log(
-                f"Sampling at {fps} fps (duration: {duration or 'unknown'}s); "
-                f"lab mode — no sharpness prune, hard-cap {preset.frame_cap}"
-            )
-        else:
-            self.log(
-                f"Sampling at {fps} fps (duration: {duration or 'unknown'}s); "
-                f"keeping the sharpest ~{keep_target} frames"
-            )
-        cmd = [
-            ffmpeg,
-            "-y",
-            "-i",
-            self.manifest.source_video,
-            "-vf",
-            f"fps={fps}",
-            "-q:v",
-            "2",
-            str(self.frames_dir / "frame_%05d.jpg"),
-        ]
-        self._run_command(cmd, "Frame extraction failed.", timeout_seconds=1800)
-        extracted_count = len(list_frames(self.frames_dir))
-        kept_count = extracted_count
-        if preset.unrestricted_frames:
-            # Hard cap: keep the FIRST preset.frame_cap frames in name order
-            # (temporal order, since ffmpeg numbers sequentially). No sharpness
-            # prune — the whole point of lab mode is feeding COLMAP an undensified
-            # set so we can see what falls out.
-            if preset.frame_cap > 0 and extracted_count > preset.frame_cap:
-                for stale in list_frames(self.frames_dir)[preset.frame_cap:]:
-                    stale.unlink(missing_ok=True)
-                extracted_count = preset.frame_cap
-                kept_count = preset.frame_cap
-                self.log(f"Lab mode: hard-capped to {preset.frame_cap} frames (no sharpness prune).")
-        elif extracted_count > FRAME_KEEP_TARGET:
-            try:
-                from .frame_selection import prune_to_sharpest
-
-                extracted_count, kept_count = prune_to_sharpest(self.frames_dir, FRAME_KEEP_TARGET)
-                self.log(f"Kept {kept_count}/{extracted_count} sharpest frames (motion-blur filter).")
-            except ImportError:
-                self.log("OpenCV unavailable; skipping blur-aware frame selection.")
-        base_frames_zip = self.manifest.metadata.get("refine_base_frames_zip")
-        # In refine mode the base set uses names like frame_00001.jpg (matching
-        # the base colmap_database). Rename the primary video's just-extracted
-        # frames with a clip0_ prefix so they don't collide, and use clip<N+1>_
-        # for the extras. In non-refine runs the primary keeps its historical
-        # frame_*.jpg name and extras get extra<N>_ as before.
-        extras_prefix_base = "clip" if base_frames_zip else "extra"
-        if base_frames_zip:
-            import shutil
-
-            for source in list_frames(self.frames_dir):
-                if not source.name.startswith("clip"):
-                    shutil.move(str(source), str(self.frames_dir / f"clip0_{source.name}"))
-        # Multi-video runs: extract each additional clip with the same fps +
-        # blur-prune budget the primary got. Per-video pruning prevents a long
-        # clip from monopolising the budget (a 350s cloudy + 130s sunny pair
-        # would otherwise be 73% cloudy if the prune ran on the combined set).
-        for index, extra_video in enumerate(self.manifest.metadata.get("extra_videos", []) or []):
-            offset = 1 if base_frames_zip else 0
-            self._extract_extra_video(
-                extra_video,
-                prefix=f"{extras_prefix_base}{index + offset}_",
-                ffmpeg=ffmpeg,
-            )
-        # Refine mode: merge the base job's frames LAST. Original filenames are
-        # preserved (see _merge_refine_base_frames) so the base colmap_database
-        # lookups still hit.
-        if base_frames_zip:
-            self._merge_refine_base_frames(Path(base_frames_zip))
-        frame_paths = list_frames(self.frames_dir)
-        if not frame_paths:
-            raise RuntimeError("No frames were extracted.")
-        preview_manifest = self.frames_dir / "frames_manifest.json"
-        preview_manifest.write_text(
-            json.dumps(
-                {
-                    "frameCount": len(frame_paths),
-                    "sampleFrames": [str(path) for path in frame_paths[:6]],
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        stage.metadata = {"frameCount": len(frame_paths), "fps": fps, "extracted": extracted_count}
-        stage.message = f"Extracted {len(frame_paths)} frames."
-        self._add_artifact(stage, "Frames Manifest", "json", preview_manifest, "Frame extraction summary.")
-        for index, frame in enumerate(frame_paths[:3], start=1):
-            self._add_artifact(stage, f"Frame Preview {index}", "image", frame, "Sample extracted frame.")
+        from .stages import frame_extraction
+        frame_extraction.run(self, stage)
 
     def _extract_extra_video(self, video_path: str, prefix: str, ffmpeg: str) -> None:
-        """Extract an additional clip into self.frames_dir, prefixed and pruned.
-
-        Each extra clip gets its own temp dir for the ffmpeg dump and its own
-        sharpness pass, so the prune budget is per-video. After pruning, files
-        are moved into self.frames_dir as ``<prefix>frame_NNNNN.jpg``. We try
-        to read duration from ffprobe; on failure (e.g. ffprobe not in PATH)
-        we fall back to the same fps the primary chose.
-        """
-        import shutil
-        import subprocess
-        import tempfile
-
-        video = Path(video_path)
-        if not video.exists():
-            self.log(f"Extra video skipped: {video} does not exist.")
-            return
-        # Duration is opportunistic — compute_extraction_fps handles None.
-        duration: float | None = None
-        try:
-            probe = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", str(video)],
-                capture_output=True, text=True, timeout=30,
-            )
-            duration = float(probe.stdout.strip()) if probe.returncode == 0 else None
-        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
-            pass
-        fps = compute_extraction_fps(duration, target_frames=FRAME_EXTRACT_TARGET)
-        with tempfile.TemporaryDirectory(prefix=f"vw-{prefix.strip('_')}-") as tmpdir:
-            tmp_path = Path(tmpdir)
-            self.log(f"Extracting extra video {video.name} at {fps} fps (duration: {duration or 'unknown'}s)")
-            cmd = [
-                ffmpeg, "-y", "-i", str(video),
-                "-vf", f"fps={fps}", "-q:v", "2",
-                str(tmp_path / "frame_%05d.jpg"),
-            ]
-            self._run_command(cmd, f"Extra-video extraction failed for {video.name}.", timeout_seconds=1800)
-            raw_count = len(list_frames(tmp_path))
-            kept_count = raw_count
-            if raw_count > FRAME_KEEP_TARGET:
-                try:
-                    from .frame_selection import prune_to_sharpest
-
-                    raw_count, kept_count = prune_to_sharpest(tmp_path, FRAME_KEEP_TARGET)
-                except ImportError:
-                    self.log("OpenCV unavailable; skipping blur-aware prune for extra video.")
-            for source in list_frames(tmp_path):
-                shutil.move(str(source), str(self.frames_dir / f"{prefix}{source.name}"))
-            self.log(f"Extra video {video.name}: kept {kept_count}/{raw_count} frames (prefix={prefix}).")
+        from .stages import frame_extraction
+        frame_extraction.extract_extra_video(self, video_path, prefix, ffmpeg)
 
     def _merge_refine_base_frames(self, base_zip: Path) -> None:
-        """Unpack the base job's frames into self.frames_dir with ORIGINAL names.
-
-        The worker's --refine-mode looks up each image in the base
-        colmap_database.db by name to know which features are already cached.
-        Prefixing the base frames would make colmap see them as new images
-        and re-extract features, defeating the point of refine. New-clip
-        frames are prefixed (clip<N>_) on the extraction side instead.
-        """
-        import zipfile
-
-        if not base_zip.exists():
-            self.log(f"Refine: base frames zip not found at {base_zip}; skipping merge.")
-            return
-        merged = 0
-        with zipfile.ZipFile(base_zip) as archive:
-            for info in archive.infolist():
-                if info.is_dir():
-                    continue
-                bare = Path(info.filename).name
-                if not bare:
-                    continue
-                target = self.frames_dir / bare
-                with archive.open(info) as src, open(target, "wb") as dst:
-                    dst.write(src.read())
-                merged += 1
-        new_count = sum(
-            1 for p in list_frames(self.frames_dir)
-            if p.name.startswith("clip")
-        )
-        self.log(
-            f"Refine: merged {merged} base frames into {self.frames_dir.name} "
-            f"(new={new_count}, total={new_count + merged})."
-        )
+        from .stages import frame_extraction
+        frame_extraction.merge_refine_base_frames(self, base_zip)
 
     def _run_reconstruction(self, stage: StageRecord) -> None:
-        self.recon_dir.mkdir(parents=True, exist_ok=True)
-        if not list_frames(self.frames_dir):
-            raise RuntimeError("Frame extraction must complete before reconstruction.")
-        preset = get_preset(self.manifest.metadata.get("preset"))
-        exported_ply: Path | None = None
-        resume_job_id: str | None = self.manifest.metadata.get("resume_job_id")
-
-        if stage.placement == "remote" and self.remote_runner is not None:
-            try:
-                if preset.split_jobs:
-                    exported_ply = self._run_split_remote_reconstruction(
-                        stage, preset, resume_job_id=resume_job_id
-                    )
-                else:
-                    exported_ply = self._run_remote_reconstruction(
-                        stage, preset, resume_job_id=resume_job_id
-                    )
-            except StageCancelledError:
-                raise
-            except CostDeniedError as exc:
-                self.log(f"{exc} Using the local quick path instead.")
-            except Exception as exc:  # noqa: BLE001 - incl. hub HTTP errors, which are not RuntimeErrors
-                if self.strict_mode:
-                    raise
-                self.log(f"Remote reconstruction failed, falling back to local path: {exc}")
-        elif stage.placement == "remote":
-            self.log(
-                "Reconstruction prefers remote execution but no remote runner is "
-                "configured (Settings > Remote Compute). Using the local quick path."
-            )
-
-        if exported_ply is None:
-            exported_ply = self._run_local_reconstruction(stage)
-
-        degraded = True
-        if exported_ply is not None and is_gaussian_ply(exported_ply):
-            try:
-                info = convert_splat_outputs(
-                    exported_ply,
-                    self.recon_ply_path,
-                    self.recon_preview_ply_path,
-                    self.recon_stage_path,
-                    self.log,
-                )
-                stage.metadata.update(info)
-                degraded = False
-            except Exception as exc:  # noqa: BLE001
-                if self.strict_mode:
-                    raise
-                self.log(f"Splat conversion failed: {exc}")
-        elif exported_ply is not None:
-            # Unexpected non-gaussian PLY: keep the legacy point-cloud conversion.
-            degraded = not self._convert_ply_to_cloud_files(exported_ply)
-
-        if not self.recon_stage_path.exists():
-            self._write_placeholder_reconstruction()
-            degraded = True
-        if not self.recon_ply_path.exists():
-            self._write_placeholder_ply()
-            degraded = True
-
-        if not degraded and self.recon_preview_ply_path.exists():
-            self._gravity_align(stage)
-        if not degraded and self.recon_ply_path.exists():
-            self._write_packed_splat(stage)
-
-        stage.metadata["degraded"] = degraded
-        stage.metadata["preset"] = preset.key
-        stage.message = (
-            "Reconstruction completed with placeholder-safe outputs."
-            if degraded
-            else f"Reconstruction completed ({stage.metadata.get('gaussians', '?')} gaussians, preset: {preset.key})."
-        )
-        self._add_artifact(stage, "Reconstruction Stage", "usd", self.recon_stage_path, "Reconstruction stage.")
-        self._add_artifact(stage, "Reconstruction PLY", "ply", self.recon_ply_path, "Gaussian splat output.")
-        if self.recon_preview_ply_path.exists():
-            self._add_artifact(
-                stage, "Preview Point Cloud", "ply", self.recon_preview_ply_path,
-                "Decimated point cloud for the live viewer.",
-            )
+        from .stages import reconstruction
+        reconstruction.run(self, stage)
 
     def _run_split_remote_reconstruction(
         self,
@@ -828,173 +512,8 @@ class DigitalTwinStudioRunner:
         preset,
         resume_job_id: str | None = None,
     ) -> Path | None:
-        """Two-job split: SfM on cpu-upgrade, training on GPU.
-
-        Job A (cpu-upgrade) runs COLMAP (--sfm-only) and uploads
-        processed_min.zip to the HF artifact dataset under
-        jobs/<job_id>/reconstruction_sfm/out/processed_min.zip.
-
-        Job B (GPU, preset.flavor) pulls that artifact via extra_repo_inputs
-        and runs --train-only (skipping ns-process-data/COLMAP entirely).
-        Both are sequential — Job B blocks on Job A.
-        """
-        import json as _json
-        import zipfile
-
-        runner_config = getattr(self.remote_runner, "config", None)
-        image_name = getattr(runner_config, "worker_image", "") if runner_config else ""
-        if not image_name or image_name.startswith("python:"):
-            raise RuntimeError(
-                "Remote worker image not configured. Build it with "
-                "tools/build_worker_image.ps1 and set worker_image in Settings."
-            )
-
-        frames_zip = self.recon_dir / "frames.zip"
-        frame_paths = list_frames(self.frames_dir)
-        hf_job_id = resume_job_id or self.manifest.job_id
-        if resume_job_id:
-            self.log(
-                f"[split] Reusing frames from prior job {resume_job_id} — "
-                f"skipping frames.zip upload ({len(frame_paths)} local frames)"
-            )
-        else:
-            with zipfile.ZipFile(frames_zip, "w", zipfile.ZIP_STORED) as archive:
-                for frame in frame_paths:
-                    archive.write(frame, frame.name)
-            self.log(
-                f"[split] Packed {len(frame_paths)} frames "
-                f"({frames_zip.stat().st_size // 1_000_000} MB)"
-            )
-
-        export_dir = self.recon_dir / "gsplat_export"
-        export_dir.mkdir(parents=True, exist_ok=True)
-        splat_path = export_dir / "splat.ply"
-        summary_path = self.recon_dir / "summary.json"
-        remote_out_dir = self.recon_dir / "remote_out"
-        bundle_model = remote_out_dir / "model.zip"
-        bundle_processed = remote_out_dir / "processed_min.zip"
-
-        # ---- Job A: SfM only on cpu-upgrade ----
-        refine_from = self.manifest.metadata.get("refine_from_job_id")
-        sfm_command = [
-            "python", "/opt/vw/recon_entrypoint.py",
-            "--sfm-only",
-            "--downscale", str(preset.downscale_factor),
-            "--keep-checkpoint",
-        ]
-        sfm_extra_inputs: list[str] = []
-        if refine_from:
-            # Pull base processed_min.zip so the SfM job can do image_registrator.
-            base_prefix = f"jobs/{refine_from}/reconstruction/out"
-            sfm_extra_inputs = [
-                f"{base_prefix}/model.zip",
-                f"{base_prefix}/processed_min.zip",
-            ]
-            sfm_command.append("--refine-mode")
-
-        # processed_min.zip from the SfM job is the only expected output for Job A.
-        sfm_processed_out = remote_out_dir / "sfm_processed_min.zip"
-        # Preset can override both the worker image (lab Space) and the SfM
-        # timeout (lab runs need 12h ceilings, not the default est*4). Image
-        # override may contain {owner}; resolve it against the runner's image.
-        sfm_image = image_name
-        if preset.sfm_image_override:
-            owner = image_name.split("/")[-2] if "/" in image_name else ""
-            sfm_image = preset.sfm_image_override.format(owner=owner)
-        sfm_timeout = (
-            preset.sfm_timeout_seconds
-            if preset.sfm_timeout_seconds > 0
-            else int(max(3600, preset.sfm_est_minutes * 60 * 4))
-        )
-        sfm_ctx = StageContext(
-            job_dir=self.root,
-            job_id=hf_job_id,
-            stage_key="reconstruction_sfm",
-            params={
-                "image": sfm_image,
-                "image_has_hub": True,
-                "flavor": preset.sfm_flavor,
-                "est_minutes": preset.sfm_est_minutes,
-                "timeout_seconds": sfm_timeout,
-                "command": sfm_command,
-                "extra_repo_inputs": sfm_extra_inputs,
-            },
-            inputs=[frames_zip],
-            expected_outputs=[sfm_processed_out],
-            log=self.log,
-            cancel=self.cancel_token,
-            skip_inputs_upload=bool(resume_job_id),
-        )
-        self.log(
-            f"[split] Job A (SfM, {preset.sfm_flavor}) — "
-            f"est {preset.sfm_est_minutes:.0f} min ~${preset.sfm_cost().est_usd:.2f}"
-        )
-        sfm_result = self.remote_runner.run(sfm_ctx)
-        stage.runner = self.remote_runner.name
-        if sfm_result.metadata:
-            record_spend(self.manifest, "reconstruction_sfm", sfm_result.metadata)
-        if not sfm_processed_out.exists():
-            raise RuntimeError(
-                "SfM job (Job A) did not produce processed_min.zip — "
-                "check the HF job logs for COLMAP errors."
-            )
-
-        # ---- Job B: training only on GPU ----
-        # Pull Job A's processed_min.zip from the artifact dataset (it was
-        # uploaded there by the SfM worker). No re-upload needed — xet.
-        sfm_out_prefix = f"jobs/{hf_job_id}/reconstruction_sfm/out"
-        train_command = [
-            "python", "/opt/vw/recon_entrypoint.py",
-            "--train-only",
-            "--downscale", str(preset.downscale_factor),
-            "--train-args", _json.dumps(preset.train_args()),
-            "--keep-checkpoint",
-        ]
-        # Job B needs three things in VW_IN:
-        #   processed_min.zip  — Job A's SfM output (transforms.json, sparse model, db)
-        #   frames.zip         — the actual images, since processed_min.zip doesn't
-        #                        contain them and ns-train's nerfstudio-data parser
-        #                        reads file_path entries relative to --data processed
-        #   model.zip          — only when refining: base checkpoint for --load-dir
-        # vw_stage.py moves each extra to in_dir/<basename>, so the worker sees
-        # frames.zip + processed_min.zip side by side.
-        train_extra_inputs = [
-            f"{sfm_out_prefix}/processed_min.zip",
-            f"jobs/{hf_job_id}/reconstruction_sfm/in/frames.zip",
-        ]
-        if refine_from:
-            base_prefix = f"jobs/{refine_from}/reconstruction/out"
-            train_extra_inputs.append(f"{base_prefix}/model.zip")
-            train_command.append("--refine-mode")
-
-        train_ctx = StageContext(
-            job_dir=self.root,
-            job_id=hf_job_id,
-            stage_key="reconstruction",
-            params={
-                "image": image_name,
-                "image_has_hub": True,
-                "flavor": preset.flavor,
-                "est_minutes": preset.est_minutes,
-                "timeout_seconds": int(max(1800, preset.est_minutes * 60 * 4)),
-                "command": train_command,
-                "extra_repo_inputs": train_extra_inputs,
-            },
-            inputs=[],  # frames already on HF; processed_min.zip via extra_repo_inputs
-            expected_outputs=[splat_path, summary_path, bundle_model, bundle_processed],
-            log=self.log,
-            cancel=self.cancel_token,
-            skip_inputs_upload=True,  # no local inputs to upload for Job B
-        )
-        self.log(
-            f"[split] Job B (training, {preset.flavor}) — "
-            f"est {preset.est_minutes:.0f} min ~${preset.train_cost().est_usd:.2f}"
-        )
-        train_result = self.remote_runner.run(train_ctx)
-        stage.params = {"preset": preset.key, "flavor": preset.flavor, "split_jobs": True}
-        if train_result.metadata:
-            record_spend(self.manifest, "reconstruction", train_result.metadata)
-        return splat_path if splat_path.exists() else None
+        from .stages import reconstruction
+        return reconstruction._run_split_remote(self, stage, preset, resume_job_id=resume_job_id)
 
     def _run_remote_reconstruction(
         self,
@@ -1002,580 +521,72 @@ class DigitalTwinStudioRunner:
         preset,
         resume_job_id: str | None = None,
     ) -> Path | None:
-        """Train the splat on rented GPU compute (HF Jobs). Returns the splat PLY.
-
-        When ``resume_job_id`` is provided the frames.zip upload is skipped and
-        the HF artifact prefix is set to the original job so the worker finds
-        the already-uploaded input on the dataset.
-        """
-        import json as _json
-        import zipfile
-
-        runner_config = getattr(self.remote_runner, "config", None)
-        image_name = getattr(runner_config, "worker_image", "") if runner_config else ""
-        if not image_name or image_name.startswith("python:"):
-            raise RuntimeError(
-                "Remote worker image not configured. Build it with "
-                "tools/build_worker_image.ps1 and set worker_image in Settings."
-            )
-
-        frames_zip = self.recon_dir / "frames.zip"
-        frame_paths = list_frames(self.frames_dir)
-        if resume_job_id:
-            self.log(
-                f"[resume] Reusing frames from prior job {resume_job_id} — "
-                f"skipping frames.zip upload ({len(frame_paths)} local frames available for reference)"
-            )
-        else:
-            with zipfile.ZipFile(frames_zip, "w", zipfile.ZIP_STORED) as archive:
-                for frame in frame_paths:
-                    archive.write(frame, frame.name)
-            self.log(
-                f"Packed {len(frame_paths)} frames for remote reconstruction "
-                f"({frames_zip.stat().st_size // 1_000_000} MB)"
-            )
-
-        export_dir = self.recon_dir / "gsplat_export"
-        export_dir.mkdir(parents=True, exist_ok=True)
-        splat_path = export_dir / "splat.ply"
-        summary_path = self.recon_dir / "summary.json"
-        # Force the worker bundle into expected_outputs so a missing render
-        # bundle fails the reconstruction stage NOW instead of silently
-        # falling back to a slideshow at cosmos_output time. _run_remote_render
-        # checks both files at reconstruction/remote_out/.
-        remote_out_dir = self.recon_dir / "remote_out"
-        bundle_model = remote_out_dir / "model.zip"
-        bundle_processed = remote_out_dir / "processed_min.zip"
-
-        # Refine mode plumbs the base job's bundle into the worker via the
-        # artifact dataset (no re-upload — the files already live there from
-        # the base run) and asks the worker to skip the standard COLMAP path.
-        refine_from = self.manifest.metadata.get("refine_from_job_id")
-        worker_command = [
-            "python", "/opt/vw/recon_entrypoint.py",
-            "--downscale", str(preset.downscale_factor),
-            "--train-args", _json.dumps(preset.train_args()),
-            "--keep-checkpoint",
-        ]
-        extra_repo_inputs: list[str] = []
-        if refine_from:
-            base_prefix = f"jobs/{refine_from}/reconstruction/out"
-            extra_repo_inputs = [
-                f"{base_prefix}/model.zip",
-                f"{base_prefix}/processed_min.zip",
-            ]
-            worker_command.append("--refine-mode")
-
-        # When resuming, reuse the original job's HF artifact prefix so the
-        # worker finds the already-uploaded frames.zip without re-uploading.
-        hf_job_id = resume_job_id or self.manifest.job_id
-        ctx = StageContext(
-            job_dir=self.root,
-            job_id=hf_job_id,
-            stage_key="reconstruction",
-            params={
-                "image": image_name,
-                "image_has_hub": True,
-                "flavor": preset.flavor,
-                "est_minutes": preset.est_minutes,
-                # Headroom for COLMAP non-determinism: when sequential matching
-                # draws a degenerate init pair, retry_mapper either recovers in
-                # ~2 min OR falls through to exhaustive matching, which adds
-                # 25-40 min on top of the baseline. 6x est gives a job that
-                # finishes in ~10-15 min on the happy path and still has room
-                # for the exhaustive fallback.
-                "timeout_seconds": int(max(3600, preset.est_minutes * 60 * 6)),
-                "command": worker_command,
-                "extra_repo_inputs": extra_repo_inputs,
-            },
-            inputs=[frames_zip],
-            expected_outputs=[splat_path, summary_path, bundle_model, bundle_processed],
-            log=self.log,
-            cancel=self.cancel_token,
-            skip_inputs_upload=bool(resume_job_id),
-        )
-        result = self.remote_runner.run(ctx)
-        stage.runner = self.remote_runner.name
-        stage.params = {"preset": preset.key, "flavor": preset.flavor}
-        if result.metadata:
-            record_spend(self.manifest, "reconstruction", result.metadata)
-        return splat_path if splat_path.exists() else None
+        from .stages import reconstruction
+        return reconstruction._run_remote(self, stage, preset, resume_job_id=resume_job_id)
 
     def _run_local_reconstruction(self, stage: StageRecord) -> Path | None:
-        """Local quick path (250-iteration smoke training). Heavy local runs stay opt-in."""
-        ns_process_data = resolve_binary("ns-process-data")
-        colmap_bin = resolve_binary("colmap")
-        ns_train = resolve_binary("ns-train")
-
-        run_env = os.environ.copy()
-        run_env["PYTHONUTF8"] = "1"
-        if colmap_bin:
-            colmap_dir = str(Path(colmap_bin).parent.resolve())
-            run_env["PATH"] = f"{colmap_dir}{os.pathsep}{run_env.get('PATH', '')}"
-
-        if not (ns_process_data and colmap_bin):
-            return None
-        cmd = [
-            ns_process_data,
-            "images",
-            "--data",
-            str(self.frames_dir),
-            "--output-dir",
-            str(self.recon_dir),
-        ]
-        if str(colmap_bin).upper().endswith(".BAT"):
-            cmd.extend(["--colmap-cmd", "COLMAP.bat"])
-        try:
-            self._run_command(cmd, "Reconstruction failed.", timeout_seconds=3600, env=run_env)
-        except RuntimeError:
-            if self.strict_mode:
-                raise
-            return None
-
-        transforms_path = self.recon_dir / "transforms.json"
-        if not (ns_train and transforms_path.exists()):
-            return None
-        local_preset = get_preset("local-debug")
-        train_cmd = [
-            ns_train,
-            "splatfacto",
-            "--data",
-            str(self.recon_dir),
-            "--output-dir",
-            str(self.recon_dir / "gsplat_outputs"),
-            *local_preset.train_args(),
-        ]
-        try:
-            self._run_command(train_cmd, "gsplat training failed.", timeout_seconds=3600, env=run_env)
-            return self._export_gsplat_ply()
-        except RuntimeError:
-            if self.strict_mode:
-                raise
-            return None
+        from .stages import reconstruction
+        return reconstruction._run_local(self, stage)
 
     def _run_camera_staging(self, stage: StageRecord) -> None:
-        # Read the pause flag BEFORE any handler logic touches stage.metadata;
-        # the metadata dict is replaced wholesale further down, which would
-        # wipe the flag and trap re-runs in a permanent NEEDS_USER_INPUT loop.
-        already_paused = bool(stage.metadata.get("pausedForUserInput"))
-        self.usd_dir.mkdir(parents=True, exist_ok=True)
-        self.cameras_dir.mkdir(parents=True, exist_ok=True)
-        stage_path = Usd.Stage.CreateNew(str(self.usd_stage_path))
-        UsdGeom.SetStageUpAxis(stage_path, UsdGeom.Tokens.y)
-        world = UsdGeom.Xform.Define(stage_path, "/World")
-        stage_path.SetDefaultPrim(world.GetPrim())
-        ground = UsdGeom.Cube.Define(stage_path, "/World/Environment/Ground")
-        ground.CreateSizeAttr(1.0)
-        ground.AddScaleOp().Set(Gf.Vec3f(20.0, 0.1, 20.0))
-        ground.AddTranslateOp().Set(Gf.Vec3f(0.0, -0.05, 0.0))
-        light = UsdLux.DistantLight.Define(stage_path, "/World/Environment/Sun")
-        light.CreateIntensityAttr(900.0)
-        twin = UsdGeom.Xform.Define(stage_path, "/World/DigitalTwin")
-        twin.GetPrim().CreateAttribute("sourceVideo", Sdf.ValueTypeNames.String, custom=True).Set(self.manifest.source_video)
-        if self.recon_stage_path.exists():
-            twin.GetPrim().GetReferences().AddReference(str(self.recon_stage_path))
-
-        bundle = build_camera_bundle(str(self.manifest.metadata.get("cameraPrompt", DEFAULT_CAMERA_PROMPT)))
-        UsdGeom.Xform.Define(stage_path, "/World/Navigation")
-
-        center = self._scene_center()
-        entities: list[CameraEntity] = []
-        for shot in bundle["allShots"]:
-            entities.append(
-                CameraEntity(
-                    name=shot["name"],
-                    source=shot["source"],
-                    keyframes=[
-                        CameraKeyframe(t=0.0, position=list(shot["position"]), look_at=list(center))
-                    ],
-                )
-            )
-        captured = load_captured_entities(Path(self.manifest.output_dir) / "usd" / "captured_cameras.json")
-        entities.extend(captured)
-        visit_path = build_visit_path(captured)
-        if visit_path is not None:
-            entities.append(visit_path)
-
-        for entity in entities:
-            author_usd_camera(stage_path, f"/World/Navigation/{_slugify(entity.name)}", entity)
-        stage_path.GetRootLayer().Save()
-
-        # The render path: user-authored walkthrough when captures exist,
-        # otherwise a gentle orbit around the scene.
-        path_entity = visit_path or self._default_orbit_path(center)
-        self.camera_render_path.write_text(
-            json.dumps(to_nerfstudio_camera_path(path_entity), indent=2), encoding="utf-8"
-        )
-        self.manifest.metadata["cameras"] = [entity.to_dict() for entity in entities]
-        self.camera_plan_path.write_text(
-            json.dumps({**bundle, "entities": self.manifest.metadata["cameras"]}, indent=2),
-            encoding="utf-8",
-        )
-        preview_paths = self._render_camera_previews(bundle["allShots"])
-        stage.metadata = {
-            "cameraCount": len(entities),
-            "capturedCount": len(captured),
-            "renderPath": path_entity.name,
-        }
-        stage.message = (
-            f"USD stage composed with {len(entities)} cameras "
-            f"({len(captured)} captured); render path: {path_entity.name}."
-        )
-
-        # Guided mode pauses once when no user captures exist so the user can
-        # author poses in the viewport before the path renders downstream.
-        # Re-running with the metadata flag set finalises (whether captures
-        # were added or the user chose to accept the presets as-is).
-        if self.manifest.mode == "guided" and len(captured) == 0 and not already_paused:
-            stage.metadata["pausedForUserInput"] = True
-            stage.message = (
-                f"Generated {len(entities)} default cameras. Capture poses in "
-                "the viewport to add more, then re-run this step. Re-run as-is "
-                "to accept the defaults."
-            )
-            stage.state = StageState.NEEDS_USER_INPUT.value
-            self.log(stage.message)
-            # Skip artifact registration: the USD stage is provisional until
-            # the user finalises on the next invocation.
-            return
-        self._add_artifact(stage, "USD Stage", "usd", self.usd_stage_path, "Composed digital twin stage.")
-        self._add_artifact(stage, "Camera Plan", "json", self.camera_plan_path, "Cameras and paths.")
-        self._add_artifact(stage, "Render Camera Path", "json", self.camera_render_path, "ns-render camera path.")
-        for index, preview in enumerate(preview_paths[:3], start=1):
-            self._add_artifact(stage, f"Camera Preview {index}", "image", preview, "Generated camera preview.")
+        from .stages import camera_staging
+        camera_staging.run(self, stage)
 
     def _scene_center(self) -> list[float]:
-        """Robust centroid of the reconstruction (preview cloud percentiles)."""
-        try:
-            import numpy as np
-            from plyfile import PlyData
-
-            vertex = PlyData.read(str(self.recon_preview_ply_path))["vertex"]
-            points = np.stack([vertex["x"], vertex["y"], vertex["z"]], axis=1)
-            low, high = np.percentile(points, [5, 95], axis=0)
-            return [float(v) for v in (low + high) / 2]
-        except Exception:  # noqa: BLE001 - placeholder scenes have no preview
-            return [0.0, 0.0, 0.0]
+        from .stages import camera_staging
+        return camera_staging._scene_center(self)
 
     def _gravity_align(self, stage: StageRecord) -> None:
-        """Rotate cloud.ply + cloud_preview.ply so world +Y is up.
-
-        Skips silently if the strict-mode build flag is off and the rotation
-        fails (alignment is a polish step, not a correctness gate).
-        """
-        from .gravity_align import align_cloud
-
-        summary_path = self.recon_dir / "summary.json"
-        try:
-            result = align_cloud(
-                self.recon_ply_path,
-                self.recon_preview_ply_path,
-                summary_path=summary_path,
-                captured_cameras_path=self.usd_dir / "captured_cameras.json",
-            )
-        except Exception as exc:  # noqa: BLE001 - alignment is best-effort
-            if self.strict_mode:
-                raise
-            self.log(f"Gravity alignment skipped: {exc}")
-            return
-        if result is None:
-            self.log("Gravity alignment skipped (cloud already aligned).")
-            stage.metadata["gravity_aligned"] = True
-            return
-        stage.metadata["gravity_aligned"] = True
-        stage.metadata["alignment_tilt_degrees"] = round(result.angle_from_y_degrees, 2)
-        self.log(
-            "Gravity-aligned cloud: rotated "
-            f"{result.angle_from_y_degrees:.1f}° to bring scene up to +Y "
-            f"(skewness {result.skewness:+.2f}, flipped={result.flipped})."
-        )
+        from .stages import reconstruction
+        reconstruction._gravity_align(self, stage)
 
     def _write_packed_splat(self, stage: StageRecord) -> None:
-        """Encode the splat PLY into the compact .splat format for fast loads.
-
-        ~7x smaller than the equivalent PLY (32 bytes per gaussian vs the full
-        ply row), and the viewer skips the PLY header parse entirely. Best
-        effort: skips silently outside strict mode if the input isn't a 3DGS
-        PLY (placeholder paths) or anything else goes sideways.
-        """
-        from .splat_io import is_gaussian_ply
-        from .splat_packed import ply_to_splat
-
-        if not is_gaussian_ply(self.recon_ply_path):
-            return
-        try:
-            size = ply_to_splat(self.recon_ply_path, self.recon_splat_path)
-        except Exception as exc:  # noqa: BLE001 - packing is opportunistic
-            if self.strict_mode:
-                raise
-            self.log(f"Packed .splat skipped: {exc}")
-            return
-        stage.metadata["packedSplatBytes"] = size
-        self.log(f"Packed .splat written: {size // 1_000_000} MB.")
+        from .stages import reconstruction
+        reconstruction._write_packed_splat(self, stage)
 
     def _default_orbit_path(self, center: list[float], seconds: float = 12.0) -> CameraEntity:
-        from .walk_patterns import SceneBounds, bounds_from_preview_ply, orbit
-
-        try:
-            bounds = bounds_from_preview_ply(self.recon_preview_ply_path)
-            # Honour the caller's centroid: it already does the same percentile
-            # math but may incorporate other heuristics.
-            bounds = SceneBounds(center=tuple(float(value) for value in center), radius=bounds.radius)
-        except Exception:  # noqa: BLE001 - placeholder scenes have no preview cloud
-            bounds = SceneBounds(center=tuple(float(value) for value in center), radius=2.0)
-        return orbit(bounds, seconds=seconds, name="Scene Orbit")
+        from .stages import camera_staging
+        return camera_staging._default_orbit_path(self, center, seconds=seconds)
 
     def _run_cosmos_output(self, stage: StageRecord) -> None:
-        self.cosmos_dir.mkdir(parents=True, exist_ok=True)
-        self.deliverables_dir.mkdir(parents=True, exist_ok=True)
-        annotation_path = self.cosmos_dir / "cosmos_annotations.json"
-        annotation_path.write_text(
-            json.dumps(
-                {
-                    "sourceStage": str(self.usd_stage_path),
-                    "model": "cosmos-reason2 (placeholder-safe)",
-                    "annotations": [
-                        {"label": "environment", "path": "/World/Environment"},
-                        {"label": "digital-twin", "path": "/World/DigitalTwin"},
-                    ],
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        transfer_path = self.cosmos_dir / "cosmos_transfer_notes.txt"
-        transfer_path.write_text(
-            "Placeholder-safe Cosmos Transfer notes.\n"
-            f"Source stage: {self.usd_stage_path}\n",
-            encoding="utf-8",
-        )
-        rendered_remotely = False
-        if self.remote_runner is not None:
-            try:
-                rendered_remotely = self._run_remote_render(stage)
-            except StageCancelledError:
-                raise
-            except CostDeniedError as exc:
-                self.log(f"{exc} Falling back to the preview slideshow.")
-            except Exception as exc:  # noqa: BLE001
-                if self.strict_mode:
-                    raise
-                self.log(f"Remote walkthrough render failed, using preview slideshow: {exc}")
-
-        if rendered_remotely:
-            self.manifest.walkthrough_video = str(self.splat_walkthrough_path)
-            self._add_artifact(
-                stage, "Walkthrough Video", "video", self.splat_walkthrough_path,
-                "Splat-rendered camera-path walkthrough.",
-            )
-            stage.message = "Cosmos artifacts written; splat walkthrough rendered along the camera path."
-        else:
-            self._build_walkthrough_video()
-            self.manifest.walkthrough_video = str(self.walkthrough_path)
-            self._add_artifact(stage, "Walkthrough Video", "video", self.walkthrough_path, "Final MP4 walkthrough.")
-            stage.message = "Cosmos artifacts written and walkthrough video rendered."
-        self._add_artifact(stage, "Cosmos Annotation", "json", annotation_path, "Reason model output.")
-        self._add_artifact(stage, "Cosmos Transfer Notes", "text", transfer_path, "Transfer model notes.")
+        from .stages import cosmos_output
+        cosmos_output.run(self, stage)
 
     def _run_remote_render(self, stage: StageRecord) -> bool:
-        """Render the authored camera path with the trained splat (HF Job).
-
-        Needs the recon stage's checkpoint bundle in the artifact dataset
-        (model.zip + processed_min.zip, produced by remote reconstructions
-        from M2 onward) and the camera_path.json authored by camera staging.
-        """
-        remote_out = self.root / "reconstruction" / "remote_out"
-        bundle_ok = (remote_out / "model.zip").exists() and (remote_out / "processed_min.zip").exists()
-        if not bundle_ok or not self.camera_render_path.exists():
-            self.log(
-                "No render bundle for this job (model.zip + processed_min.zip + camera_path.json) — "
-                "re-run reconstruction to bank one. Using the preview slideshow."
-            )
-            return False
-        runner_config = getattr(self.remote_runner, "config", None)
-        image_name = getattr(runner_config, "worker_image", "") if runner_config else ""
-        if not image_name or image_name.startswith("python:"):
-            raise RuntimeError("Remote worker image not configured.")
-
-        dataset_prefix = f"jobs/{self.manifest.job_id}/reconstruction/out"
-        ctx = StageContext(
-            job_dir=self.root,
-            job_id=self.manifest.job_id,
-            stage_key="walkthrough_render",
-            params={
-                "image": image_name,
-                "image_has_hub": True,
-                "flavor": "l4x1",
-                "est_minutes": 8,
-                "timeout_seconds": 2400,
-                "command": ["python", "/opt/vw/render_entrypoint.py"],
-                "extra_repo_inputs": [
-                    f"{dataset_prefix}/model.zip",
-                    f"{dataset_prefix}/processed_min.zip",
-                ],
-            },
-            inputs=[self.camera_render_path],
-            expected_outputs=[self.splat_walkthrough_path],
-            log=self.log,
-            cancel=self.cancel_token,
-        )
-        result = self.remote_runner.run(ctx)
-        if result.metadata:
-            record_spend(self.manifest, "cosmos_output", result.metadata)
-        return self.splat_walkthrough_path.exists()
+        from .stages import cosmos_output
+        return cosmos_output._run_remote_render(self, stage)
 
     def _render_camera_previews(self, shots: list[dict]) -> list[Path]:
-        try:
-            from PIL import Image, ImageDraw
-        except ImportError:
-            return []
-        paths: list[Path] = []
-        palette = {
-            "background": "#F5F5DC",
-            "surface": "#FDFDFD",
-            "accent": "#006994",
-            "accent_alt": "#D4AF37",
-            "text": "#222222",
-        }
-        for index, shot in enumerate(shots, start=1):
-            image = Image.new("RGB", (1280, 720), palette["background"])
-            draw = ImageDraw.Draw(image)
-            draw.rounded_rectangle((48, 48, 1232, 672), radius=28, fill=palette["surface"], outline=palette["accent"], width=4)
-            draw.rectangle((88, 116, 1188, 520), fill=palette["accent"])
-            draw.rectangle((124, 152, 1152, 484), fill=palette["accent_alt"])
-            draw.text((88, 72), f"{index:02d}. {shot['name']}", fill=palette["text"])
-            draw.text((88, 540), shot["description"], fill=palette["text"])
-            draw.text((88, 600), f"Source: {shot['source']} | Position: {tuple(shot['position'])}", fill=palette["text"])
-            path = self.cameras_dir / f"shot_{index:02d}.png"
-            image.save(path)
-            paths.append(path)
-        return paths
+        from .stages import camera_staging
+        return camera_staging._render_camera_previews(self, shots)
 
     def _build_walkthrough_video(self) -> None:
-        ffmpeg = resolve_binary("ffmpeg")
-        preview_paths = sorted(self.cameras_dir.glob("shot_*.png"))
-        if ffmpeg is None:
-            raise RuntimeError("ffmpeg is required to render the final walkthrough video.")
-        if not preview_paths:
-            raise RuntimeError("Camera previews must exist before rendering the walkthrough video.")
-        cmd = [
-            ffmpeg,
-            "-y",
-            "-framerate",
-            "1",
-            "-i",
-            str(self.cameras_dir / "shot_%02d.png"),
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            str(self.walkthrough_path),
-        ]
-        self._run_command(cmd, "Walkthrough render failed.", timeout_seconds=1800)
+        from .stages import cosmos_output
+        cosmos_output._build_walkthrough_video(self)
 
     def _find_gsplat_config(self) -> "Path | None":
-        """Return the most recently modified config.yml under gsplat_outputs, or None."""
-        gsplat_out = self.recon_dir / "gsplat_outputs"
-        if not gsplat_out.exists():
-            return None
-        configs = sorted(gsplat_out.rglob("config.yml"), key=lambda p: p.stat().st_mtime, reverse=True)
-        return configs[0] if configs else None
+        from .stages import reconstruction
+        return reconstruction._find_gsplat_config(self)
 
     def _export_gsplat_ply(self) -> "Path | None":
-        """Run ns-export gaussian-splat on the trained model and return the PLY path, or None."""
-        ns_export = resolve_binary("ns-export")
-        if ns_export is None:
-            self.log("ns-export not found; skipping gsplat PLY export.")
-            return None
-        config = self._find_gsplat_config()
-        if config is None:
-            self.log("No splatfacto config.yml found in gsplat_outputs; skipping PLY export.")
-            return None
-        export_dir = self.recon_dir / "gsplat_export"
-        export_dir.mkdir(parents=True, exist_ok=True)
-        cmd = [
-            ns_export,
-            "gaussian-splat",
-            "--load-config", str(config),
-            "--output-dir", str(export_dir),
-        ]
-        try:
-            self._run_command(cmd, "ns-export gaussian-splat failed.", timeout_seconds=600)
-        except RuntimeError as exc:
-            self.log(f"gsplat PLY export failed: {exc}")
-            return None
-        candidates = sorted(export_dir.rglob("*.ply"), key=lambda p: p.stat().st_mtime, reverse=True)
-        return candidates[0] if candidates else None
+        from .stages import reconstruction
+        return reconstruction._export_gsplat_ply(self)
 
     def _convert_ply_to_cloud_files(self, ply_source: Path) -> bool:
-        """Read a gsplat PLY with open3d and write cloud.ply + cloud.usda. Returns True on success."""
-        try:
-            import open3d as o3d
-        except ImportError:
-            self.log("open3d not available; cannot convert PLY.")
-            return False
-        try:
-            pcd = o3d.io.read_point_cloud(str(ply_source))
-        except Exception as exc:
-            self.log(f"open3d failed to read {ply_source}: {exc}")
-            return False
-        if len(pcd.points) == 0:
-            self.log(f"Loaded PLY has no points: {ply_source}")
-            return False
-        o3d.io.write_point_cloud(str(self.recon_ply_path), pcd)
-        self.log(f"Wrote {len(pcd.points)} points to {self.recon_ply_path}")
-        self._write_usd_from_point_cloud(pcd)
-        return True
+        from .stages import reconstruction
+        return reconstruction._convert_ply_to_cloud_files(self, ply_source)
 
     def _write_usd_from_point_cloud(self, pcd) -> None:
-        """Write cloud.usda populated with real geometry from an open3d PointCloud."""
-        stage = Usd.Stage.CreateNew(str(self.recon_stage_path))
-        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
-        root = UsdGeom.Xform.Define(stage, "/World")
-        stage.SetDefaultPrim(root.GetPrim())
-        pts_prim = UsdGeom.Points.Define(stage, "/World/Reconstruction")
-        pts_vec = [Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in pcd.points]
-        pts_prim.GetPointsAttr().Set(pts_vec)
-        pts_prim.GetWidthsAttr().Set([0.02] * len(pts_vec))
-        if pcd.has_colors():
-            pts_prim.GetDisplayColorAttr().Set(
-                [Gf.Vec3f(float(c[0]), float(c[1]), float(c[2])) for c in pcd.colors]
-            )
-        stage.GetRootLayer().Save()
-        self.log(f"Wrote USD stage with {len(pts_vec)} real points to {self.recon_stage_path}")
+        from .stages import reconstruction
+        reconstruction._write_usd_from_point_cloud(self, pcd)
 
     def _write_placeholder_reconstruction(self) -> None:
-        stage = Usd.Stage.CreateNew(str(self.recon_stage_path))
-        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
-        root = UsdGeom.Xform.Define(stage, "/World")
-        stage.SetDefaultPrim(root.GetPrim())
-        points = UsdGeom.Points.Define(stage, "/World/Reconstruction")
-        points.GetPointsAttr().Set(
-            [Gf.Vec3f(-0.5, 0.0, 0.0), Gf.Vec3f(0.0, 0.5, 0.0), Gf.Vec3f(0.5, 0.0, 0.0)]
-        )
-        points.GetWidthsAttr().Set([0.05, 0.05, 0.05])
-        stage.GetRootLayer().Save()
+        from .stages import reconstruction
+        reconstruction._write_placeholder_reconstruction(self)
 
     def _write_placeholder_ply(self) -> None:
-        self.recon_ply_path.write_text(
-            "\n".join(
-                [
-                    "ply",
-                    "format ascii 1.0",
-                    "element vertex 4",
-                    "property float x",
-                    "property float y",
-                    "property float z",
-                    "end_header",
-                    "0.0 0.0 0.0",
-                    "1.0 0.0 0.0",
-                    "0.0 1.0 0.0",
-                    "0.0 0.0 1.0",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
+        from .stages import reconstruction
+        reconstruction._write_placeholder_ply(self)
 
     def cancel(self) -> None:
         """Request cancellation of the currently running stage command."""

@@ -208,9 +208,9 @@ class TrackingRunner(FakeRemoteRunner):
 
     def run(self, ctx: StageContext) -> StageResult:
         self.calls.append(ctx)
-        # For the SfM job produce sfm_processed_min.zip; for training, produce splat + summary.
+        # For the SfM job produce processed_min.zip; for training, produce splat + summary.
         if "sfm" in ctx.stage_key:
-            sfm_out = next((p for p in ctx.expected_outputs if "sfm_processed_min" in p.name), None)
+            sfm_out = next((p for p in ctx.expected_outputs if "processed_min" in p.name), None)
             if sfm_out:
                 sfm_out.parent.mkdir(parents=True, exist_ok=True)
                 sfm_out.write_bytes(b"fake-processed")
@@ -272,8 +272,9 @@ def test_split_job_preset_cost_is_combined():
     preset = get_preset("refine")
     assert preset.split_jobs is True
     combined = preset.cost()
-    # cpu-upgrade 90 min @ $0.10/hr = $0.15; l4x1 20 min @ $0.80/hr = $0.27
-    assert combined.est_usd == pytest.approx(0.42, abs=0.05)
+    # Rates from FLAVOR_RATES_USD_PER_HOUR (base.py):
+    # cpu-upgrade 90 min @ $0.04/hr = $0.06; l4x1 20 min @ $0.80/hr = $0.27
+    assert combined.est_usd == pytest.approx(0.33, abs=0.02)
     # Individual cost helpers
     assert preset.sfm_cost().flavor == "cpu-upgrade"
     assert preset.train_cost().flavor == "l4x1"
