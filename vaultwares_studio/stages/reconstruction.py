@@ -199,6 +199,12 @@ def _run_da3_direct_gs(
                 if preset.sfm_timeout_seconds > 0
                 else int(max(1800, preset.sfm_est_minutes * 60 * 4))
             ),
+            # How long to let each flavor candidate sit in SCHEDULING before
+            # moving to the next. The 120s default suits an interactive run;
+            # an unattended retry can afford to wait much longer for capacity.
+            "flavor_scheduling_timeout_seconds": ctx.manifest.metadata.get(
+                "flavor_scheduling_timeout_seconds", 120.0
+            ),
             "command": gs_command,
             "extra_repo_inputs": [],
         },

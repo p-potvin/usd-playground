@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "Reference copy of data/remote_compute.json — the HF Jobs remote-compute",
+    "config. The real file is NOT in git: data/ is a symlink to the jobs volume",
+    "(D:\\vaultwares-studio-jobs\\data), so git will not traverse into it, and the",
+    "path is gitignored besides. Copy this file to data/remote_compute.json and",
+    "fill in your own namespace to enable remote execution.",
+    "",
+    "No secrets belong in this file. The Hugging Face token is read from the OS",
+    "keyring (service 'vaultwares-studio', account 'huggingface'), falling back",
+    "to the HF_TOKEN env var — see runners/hf_jobs.py get_hf_token().",
+    "",
+    "Losing this file is not loud: HfJobsConfig.load() silently returns",
+    "enabled=False, and the reconstruction stage then falls through to the local",
+    "quick path and writes 4-vertex placeholder PLYs instead of raising. That is",
+    "what happened on 2026-07-13 — two runs 'succeeded' with no remote job ever",
+    "submitted. If a remote run produces a placeholder, check this file first."
+  ],
+
+  "enabled": true,
+  "namespace": "clopeux",
+  "artifact_repo": "clopeux/vw-studio-artifacts",
+  "default_flavor": "l4x1",
+  "worker_image": "hf.co/spaces/clopeux/vw-studio-worker",
+  "poll_interval_seconds": 15.0
+}

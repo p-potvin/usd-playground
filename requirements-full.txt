@@ -1,19 +1,16 @@
 # =============================================================================
-# vaultwares-studio — requirements.txt (umbrella)
+# vaultwares-studio — Full install (everything)
+# Includes core + recon + gui + dev + optional integrations.
 #
-# This file installs everything. For a lighter install, use one of:
-#   requirements-core.txt   — pipeline, manifest, splat I/O, presets (no GPU)
-#   requirements-recon.txt  — torch, gsplat, nerfstudio, open3d, colmap (GPU)
-#   requirements-gui.txt    — PySide6, Fluent Widgets, redis
-#   requirements-dev.txt    — pytest, ruff, mypy, jupyterlab
-#   requirements-full.txt  — everything (this file + optional integrations)
+# NVIDIA packages (omniverse-kit, isaacsim) need:
+#   --extra-index-url https://pypi.nvidia.com
 #
-# Quick start (core + GUI, no GPU needed):
-#   pip install -r requirements-core.txt -r requirements-gui.txt
+# PyTorch CUDA wheels need:
+#   --index-url https://download.pytorch.org/whl/cu121
 #
-# Full install (needs CUDA 12.1 + NVIDIA PyPI index):
-#   pip install -r requirements-full.txt `
-#     --index-url https://download.pytorch.org/whl/cu121 `
+# Install with:
+#   pip install -r requirements-full.txt \
+#     --index-url https://download.pytorch.org/whl/cu121 \
 #     --extra-index-url https://pypi.nvidia.com
 # =============================================================================
 

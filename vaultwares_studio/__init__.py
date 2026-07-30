@@ -1,3 +1,14 @@
+from pathlib import Path as _Path
+
+# Single source of truth for the project version: the VERSION file at the repo
+# root. Read at import rather than duplicated here so a bump touches one file.
+try:
+    __version__ = (_Path(__file__).resolve().parent.parent / "VERSION").read_text(
+        encoding="utf-8"
+    ).strip()
+except OSError:  # installed without the VERSION file alongside
+    __version__ = "0.0.0"
+
 from .camera_director import CameraShot, build_camera_bundle
 from .integration import (
     VaultFlowsConnectionSettings,
@@ -45,4 +56,5 @@ __all__ = [
     "push_workflow_to_vaultwares",
     "stage_dependencies_complete",
     "test_vaultwares_api",
+    "__version__",
 ]

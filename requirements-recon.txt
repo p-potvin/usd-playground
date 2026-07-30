@@ -1,0 +1,37 @@
+# =============================================================================
+# vaultwares-studio — Reconstruction dependencies
+# GPU-accelerated 3D Gaussian Splatting, Nerfstudio, COLMAP, Open3D.
+# Requires CUDA toolkit >= 12.1 and a CUDA-enabled PyTorch wheel.
+# Install with: pip install -r requirements-recon.txt
+#   --index-url https://download.pytorch.org/whl/cu121
+# =============================================================================
+
+# Deep Learning Backbone (install with CUDA index-url)
+torch>=2.3.0
+torchvision>=0.18.0
+
+# 3D Gaussian Splatting
+gsplat>=1.4.0
+
+# Nerfstudio (ns-process-data, ns-train, ns-export)
+nerfstudio>=1.1.0
+
+# COLMAP Python bindings
+pycolmap>=4.0.0
+
+# 3D Geometry & Point Cloud Processing
+open3d>=0.18.0
+trimesh>=4.3.0
+scipy>=1.12.0  # cKDTree for ICP alignment in gaussian_merge.py
+
+# Image & Video Processing
+opencv-python>=4.9.0
+imageio>=2.34.0
+imageio-ffmpeg>=0.5.0
+
+# Depth Anything 3 (DA3) — pose + depth + direct 3DGS
+# Install from source: pip install -e git+https://github.com/ByteDance-Seed/Depth-Anything-3.git#egg=depth_anything_3
+# Also needs xformers and a specific gsplat commit for the Gaussian head:
+#   pip install xformers
+#   pip install --no-build-isolation git+https://github.com/nerfstudio-project/gsplat.git@0b4dddf04cb687367602c01196913cde6a743d70
+xformers>=0.0.20

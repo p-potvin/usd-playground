@@ -1,7 +1,13 @@
 """Retry the reconstruction stage on an existing job (frames already extracted).
 
 Usage:
-    .venv\\Scripts\\python.exe tools\\retry_da3_draft_recon.py <job-id>
+    .venv\\Scripts\\python.exe tools\\retry_da3_draft_recon.py <job-id> [scheduling-timeout-seconds]
+
+The optional second argument is how long each flavor candidate may sit in HF's
+SCHEDULING state before the runner gives up and tries the next one. Defaults to
+600s here rather than the runner's interactive 120s: this tool is for unattended
+retries, where waiting out a busy GPU pool beats exhausting the candidate list
+in four minutes. SCHEDULING is not billed, so a long wait is free.
 """
 
 from __future__ import annotations
@@ -37,7 +43,12 @@ def main() -> int:
         print(msg, flush=True)
 
     manifest = load_job_manifest(manifest_path)
-    print(f"[retry] job_id={manifest.job_id} preset={manifest.metadata.get('preset')}")
+    scheduling_timeout = float(sys.argv[2]) if len(sys.argv) > 2 else 600.0
+    manifest.metadata["flavor_scheduling_timeout_seconds"] = scheduling_timeout
+    print(
+        f"[retry] job_id={manifest.job_id} preset={manifest.metadata.get('preset')} "
+        f"scheduling_timeout={scheduling_timeout:.0f}s per flavor"
+    )
 
     runner = DigitalTwinStudioRunner(manifest, log, strict_mode=True, remote_runner=remote_runner)
     runner.run_stage("reconstruction")
