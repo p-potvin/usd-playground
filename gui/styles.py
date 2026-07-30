@@ -206,21 +206,21 @@ QTabBar::tab:hover    {{ background: {surface_el}; color: {text}; }}
 def card_style(theme) -> str:
     return (
         f"QFrame {{ background: {theme.surface}; border: 1px solid {theme.border};"
-        " border-radius: 8px; }}"
+        " border-radius: 28px; }}"
     )
 
 
 def accent_card_style(theme) -> str:
     return (
         f"QFrame {{ background: {theme.surface_elevated}; border: 1px solid {theme.accent};"
-        " border-radius: 8px; }}"
+        " border-radius: 28px; }}"
     )
 
 
 def preview_style(theme) -> str:
     return (
         f"QLabel {{ background: {theme.surface_elevated}; color: {theme.text_secondary};"
-        f" border: 1px dashed {theme.text_muted}; border-radius: 8px;"
+        f" border: 1px dashed {theme.text_muted}; border-radius: 28px;"
         " min-height: 120px; padding: 12px; }}"
     )
 
@@ -236,5 +236,5 @@ def state_card_style(theme, state: str) -> str:
         left_color = theme.border
     return (
         f"QFrame {{ background: {theme.surface}; border: 1px solid {theme.border};"
-        f" border-left: 4px solid {left_color}; border-radius: 8px; }}"
+        f" border-left: 4px solid {left_color}; border-radius: 28px; }}"
     )

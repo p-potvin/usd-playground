@@ -1,18 +1,24 @@
 import os
 import json
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel, QPushButton,
-    QComboBox, QProgressBar, QTextEdit, QFileDialog, QMessageBox
+    QComboBox, QProgressBar, QTextEdit, QFileDialog, QMessageBox,
+    QListWidget, QListWidgetItem, QSplitter, QToolButton, QGroupBox,
+    QScrollArea, QSizePolicy
 )
 from PySide6.QtCore import Qt, QObject, Signal, Slot
+from PySide6.QtGui import QColor
 
 from vaultwares_studio.pipeline import (
     DEFAULT_CAMERA_PROMPT,
     DEFAULT_SOURCE_VIDEO,
     JOBS_DIR,
+    STAGE_DEFINITIONS,
     DigitalTwinStudioRunner,
     JobManifest,
     StageState,
@@ -98,6 +104,16 @@ class PipelineWorkspace(QFrame):
         preset_row.addWidget(self.preset_combo, 1)
         config_layout.addLayout(preset_row)
 
+        # Camera prompt row
+        prompt_row = QHBoxLayout()
+        prompt_row.addWidget(QLabel("Camera Prompt:"))
+        self.prompt_edit = QTextEdit()
+        self.prompt_edit.setMaximumHeight(60)
+        self.prompt_edit.setPlaceholderText("Describe camera shots...")
+        self.prompt_edit.setText(DEFAULT_CAMERA_PROMPT)
+        prompt_row.addWidget(self.prompt_edit, 1)
+        config_layout.addLayout(prompt_row)
+
         # Actions row
         action_row = QHBoxLayout()
         action_row.addStretch(1)
@@ -110,22 +126,78 @@ class PipelineWorkspace(QFrame):
 
         main_layout.addWidget(config_card)
 
-        # Run Logs / Execution space
+        # Step rail + logs splitter
+        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+
+        # Left: Step rail
+        step_panel = QFrame()
+        step_layout = QVBoxLayout(step_panel)
+        step_layout.setContentsMargins(0, 0, 0, 0)
+        step_layout.setSpacing(8)
+
+        step_label = QLabel("Job Steps")
+        step_label.setStyleSheet("font-weight: bold; letter-spacing: 1px;")
+        step_layout.addWidget(step_label)
+
+        self.step_list = QListWidget()
+        self.step_list.setMaximumWidth(260)
+        self.step_list.currentRowChanged.connect(self._on_step_selected)
+        step_layout.addWidget(self.step_list, 1)
+
+        # Step action buttons
+        step_btn_row = QHBoxLayout()
+        self.btn_run_step = QPushButton("Run Step")
+        self.btn_run_step.setMinimumHeight(32)
+        self.btn_run_step.clicked.connect(self._run_selected_step)
+        step_btn_row.addWidget(self.btn_run_step)
+
+        self.btn_open_folder = QPushButton("Open Folder")
+        self.btn_open_folder.setMinimumHeight(32)
+        self.btn_open_folder.clicked.connect(self._open_job_folder)
+        step_btn_row.addWidget(self.btn_open_folder)
+        step_layout.addLayout(step_btn_row)
+
+        splitter.addWidget(step_panel)
+
+        # Right: Logs
+        log_panel = QFrame()
+        log_layout = QVBoxLayout(log_panel)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.setSpacing(8)
+
+        log_header = QHBoxLayout()
         log_label = QLabel("Execution Logs")
         log_label.setStyleSheet("font-weight: bold; letter-spacing: 1px;")
-        main_layout.addWidget(log_label)
+        log_header.addWidget(log_label)
+        log_header.addStretch(1)
+        self.btn_clear_log = QPushButton("Clear")
+        self.btn_clear_log.setFixedHeight(26)
+        self.btn_clear_log.clicked.connect(self.log_area.clear if hasattr(self, 'log_area') else lambda: None)
+        log_header.addWidget(self.btn_clear_log)
+        log_layout.addLayout(log_header)
 
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
         self.log_area.setPlaceholderText("No active jobs. Awaiting initialization...")
-        main_layout.addWidget(self.log_area, 1)
+        log_layout.addWidget(self.log_area, 1)
 
-        # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setFixedHeight(8)
-        main_layout.addWidget(self.progress_bar)
+        log_layout.addWidget(self.progress_bar)
+
+        splitter.addWidget(log_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+
+        main_layout.addWidget(splitter, 1)
+
+        # Wire clear log after log_area exists
+        self.btn_clear_log.clicked.connect(self.log_area.clear)
+
+        # Populate step rail
+        self._build_step_rail()
 
     @Slot(str)
     def append_log(self, text: str):
@@ -136,6 +208,7 @@ class PipelineWorkspace(QFrame):
         self.is_running = running
         self.btn_pick_file.setEnabled(not running)
         self.btn_run.setEnabled(not running)
+        self.btn_run_step.setEnabled(not running)
         if running:
             self.btn_run.setText("RUNNING...")
         else:
@@ -157,6 +230,106 @@ class PipelineWorkspace(QFrame):
         total = len(self.manifest.stages)
         progress = int((completed / total) * 100) if total else 0
         self.progress_bar.setValue(progress)
+
+        # Refresh step rail with current states
+        self._refresh_step_rail()
+
+    def _build_step_rail(self):
+        """Populate the step list with all pipeline stage definitions."""
+        self.step_list.clear()
+        for definition in STAGE_DEFINITIONS:
+            item = QListWidgetItem(definition.title)
+            item.setData(Qt.ItemDataRole.UserRole, definition.key)
+            self.step_list.addItem(item)
+        self._refresh_step_rail()
+
+    def _refresh_step_rail(self):
+        """Update step rail items with current state colors and labels."""
+        if not self.manifest:
+            return
+        stage_map = {stage.key: stage for stage in self.manifest.stages}
+        for i in range(self.step_list.count()):
+            item = self.step_list.item(i)
+            stage_key = item.data(Qt.ItemDataRole.UserRole)
+            stage = stage_map.get(stage_key)
+            if stage:
+                state_label = STATE_LABELS.get(stage.state, stage.state)
+                item.setText(f"{stage.title}  [{state_label}]")
+                if stage.state == StageState.COMPLETE.value:
+                    item.setForeground(QColor("#6BE675"))
+                elif stage.state == StageState.RUNNING.value:
+                    item.setForeground(QColor("#55D6FF"))
+                elif stage.state == StageState.FAILED.value:
+                    item.setForeground(QColor("#FF6B7A"))
+                elif stage.state == StageState.NEEDS_USER_INPUT.value:
+                    item.setForeground(QColor("#F0B94B"))
+                else:
+                    item.setForeground(QColor(237, 230, 255, 184))
+
+    def _on_step_selected(self, row: int):
+        """Enable Run Step button if the selected step can be run."""
+        if row < 0 or not self.manifest:
+            self.btn_run_step.setEnabled(False)
+            return
+        item = self.step_list.item(row)
+        stage_key = item.data(Qt.ItemDataRole.UserRole)
+        stage_map = {stage.key: stage for stage in self.manifest.stages}
+        stage = stage_map.get(stage_key)
+        if stage and stage.state != StageState.COMPLETE.value and not self.is_running:
+            self.btn_run_step.setEnabled(True)
+        else:
+            self.btn_run_step.setEnabled(False)
+
+    def _run_selected_step(self):
+        """Run only the currently selected pipeline stage."""
+        if self.is_running or not self.manifest:
+            return
+        row = self.step_list.currentRow()
+        if row < 0:
+            return
+        item = self.step_list.item(row)
+        stage_key = item.data(Qt.ItemDataRole.UserRole)
+
+        # Save manifest
+        manifest_path = Path(self.manifest.output_dir) / "manifest.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(self.manifest.to_dict(), indent=2), encoding="utf-8")
+
+        remote_runner = self._maybe_build_remote_runner()
+        self.signals.running_changed.emit(True)
+
+        def worker():
+            try:
+                runner = DigitalTwinStudioRunner(
+                    self.manifest,
+                    self.signals.log.emit,
+                    strict_mode=self.strict_mode,
+                    remote_runner=remote_runner,
+                )
+                result = runner.run_stage(stage_key)
+            except Exception as exc:
+                self.signals.log.emit(f"[ERROR] {exc}")
+                self.signals.manifest_changed.emit(self.manifest)
+            else:
+                self.signals.manifest_changed.emit(result)
+            finally:
+                self.signals.running_changed.emit(False)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _open_job_folder(self):
+        """Open the current job's output directory in the OS file explorer."""
+        if not self.manifest:
+            return
+        job_dir = Path(self.manifest.output_dir)
+        if not job_dir.exists():
+            return
+        if os.name == "nt":
+            os.startfile(str(job_dir))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(job_dir)])
+        else:
+            subprocess.Popen(["xdg-open", str(job_dir)])
 
     def _pick_video(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -205,6 +378,10 @@ class PipelineWorkspace(QFrame):
             
         # Ensure we capture preset changes
         self.manifest.metadata["preset"] = self.preset_combo.currentData() or DEFAULT_PRESET_KEY
+        # Capture camera prompt from UI
+        prompt_text = self.prompt_edit.toPlainText().strip()
+        if prompt_text:
+            self.manifest.metadata["cameraPrompt"] = prompt_text
         
         # Save manifest
         manifest_path = Path(self.manifest.output_dir) / "manifest.json"

@@ -8,6 +8,7 @@ import * as GaussianSplats3D from './vendor/gaussian-splats-3d.module.js';
 const statusEl = document.getElementById('status');
 let bridge = null;
 let viewer = null;
+let rootElement = null;
 // Mutable world-up reference shared between flipCameraUp and the FPS / WASD
 // movement code. Starts as +Y; flipCameraUp inverts it so that after the user
 // rights the scene, FPS yaw axis and the WASD right-vector cross product both
@@ -325,6 +326,36 @@ async function main() {
     lookAt = explicitLook;
   }
 
+  // WebGL2 capability check — GaussianSplats3D requires WebGL2.
+  const testCanvas = document.createElement('canvas');
+  const gl2 = testCanvas.getContext('webgl2');
+  if (!gl2) {
+    setStatus('ERROR: WebGL2 is not available in this browser. '
+      + 'GaussianSplats3D requires WebGL2. '
+      + 'Check GPU drivers and Chromium flags.');
+    if (bridge) bridge.viewerReady();
+    return;
+  }
+  // Which GL backend we landed on (hardware vs SwiftShader) goes to the app
+  // log, not the on-screen status — it matters when diagnosing slow sorts.
+  const debugInfo = gl2.getExtension('WEBGL_debug_renderer_info');
+  const rendererName = debugInfo
+    ? gl2.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)
+    : gl2.getParameter(gl2.RENDERER);
+  if (bridge) bridge.jsLog(`WebGL2 renderer: ${rendererName}`);
+
+  // Create explicit root element with pixel dimensions.
+  // In QWebEngineView, CSS 100% width/height can resolve to 0, producing
+  // a 0×0 renderer canvas (black screen). Using explicit pixel dimensions
+  // and updating them on resize ensures the canvas always has real size.
+  rootElement = document.createElement('div');
+  rootElement.style.width = window.innerWidth + 'px';
+  rootElement.style.height = window.innerHeight + 'px';
+  rootElement.style.position = 'absolute';
+  rootElement.style.top = '0';
+  rootElement.style.left = '0';
+  document.body.appendChild(rootElement);
+
   viewer = new GaussianSplats3D.Viewer({
     cameraUp: [0, 1, 0],
     initialCameraPosition: position,
@@ -333,6 +364,10 @@ async function main() {
     // unavailable — sort on the main worker without shared memory.
     sharedMemoryForWorkers: false,
     selfDrivenMode: true,
+    rootElement: rootElement,
+    // Disable WASM SIMD — QWebEngineView's WASM runtime may not support
+    // SIMD, causing the sort worker to hang silently.
+    enableSIMDInSort: false,
   });
 
   setStatus('Loading splat scene…');
@@ -351,6 +386,29 @@ async function main() {
       },
     });
     viewer.start();
+
+    // Catch silent sort worker errors (WASM instantiation failures, etc.)
+    if (viewer.sortWorker) {
+      viewer.sortWorker.onerror = (e) => {
+        setStatus(`Sort worker error: ${e.message || e}`);
+      };
+    }
+
+    // Force resize after a short delay — QWebEngineView may not trigger
+    // ResizeObserver immediately, leaving the canvas at 0×0 (black screen).
+    const forceResize = () => {
+      if (!viewer || !viewer.renderer) return;
+      const w = rootElement.offsetWidth || window.innerWidth;
+      const h = rootElement.offsetHeight || window.innerHeight;
+      viewer.renderer.setSize(w, h, false);
+      if (viewer.camera) {
+        viewer.camera.aspect = w / h;
+        viewer.camera.updateProjectionMatrix();
+      }
+      if (viewer.forceRenderNextFrame) viewer.forceRenderNextFrame();
+    };
+    setTimeout(forceResize, 100);
+    setTimeout(forceResize, 500);
     // Keep the orbit away from the poles. OrbitControls allows phi in [0, π]
     // by default, so dragging through straight-up or straight-down crosses the
     // gimbal pole and snaps the camera roll by 180° on two axes at once — reads
@@ -616,5 +674,20 @@ async function main() {
   }
   if (bridge) bridge.viewerReady();
 }
+
+// Ensure the renderer canvas fills the viewport on resize.
+window.addEventListener('resize', () => {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  rootElement.style.width = w + 'px';
+  rootElement.style.height = h + 'px';
+  if (viewer && viewer.renderer) {
+    viewer.renderer.setSize(w, h, false);
+    if (viewer.camera) {
+      viewer.camera.aspect = w / h;
+      viewer.camera.updateProjectionMatrix();
+    }
+  }
+});
 
 main();

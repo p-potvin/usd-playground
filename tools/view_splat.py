@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--enable-unsafe-swiftshader")
 
-from gui.viewport import ViewportTab, register_viewer_scheme  # noqa: E402
+from gui.viewport import ViewportWindow, register_viewer_scheme  # noqa: E402
 
 register_viewer_scheme()
 from PySide6.QtWidgets import QApplication  # noqa: E402
@@ -47,10 +47,11 @@ def _latest_started_job_dir() -> Path | None:
 
 def main() -> int:
     app = QApplication(["VaultWares Splat Viewer"])
-    tab = ViewportTab(translate=lambda key: key)
-    tab.setWindowTitle("VaultWares Splat Viewer")
+    window = ViewportWindow(translate=lambda key: key)
+    tab = window.panel
+    window.setWindowTitle("VaultWares Splat Viewer")
     tab.log.connect(lambda message: print(message, flush=True))
-    tab.resize(1600, 950)
+    window.resize(1600, 950)
 
     target = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else _latest_started_job_dir()
     if target is None:
@@ -65,10 +66,10 @@ def main() -> int:
 
         url = QUrl(tab._server.url())
         url.setQuery(f"scene=job/{target.name}")
-        tab.show()
+        window.show()
         tab.web_view.load(url)
     else:
-        tab.show()
+        window.show()
         tab.set_job(target)
 
     return app.exec()

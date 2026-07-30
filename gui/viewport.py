@@ -221,7 +221,7 @@ if WEBENGINE_AVAILABLE:
             mime = _MIME_TYPES.get(target.suffix.lower(), "application/octet-stream")
             job.reply(mime.encode("ascii"), buffer)
 
-    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 
     class _ViewportPage(QWebEnginePage):
         """Routes the page's JS console into the app log — no more silent failures."""
@@ -261,8 +261,15 @@ if WEBENGINE_AVAILABLE:
             self.viewer_flip_changed.emit(flipped)
 
 
-class ViewportWindow(QMainWindow):
-    """Standalone Viewport window: fly around the reconstruction, capture camera poses."""
+class ViewportPanel(QFrame):
+    """Embeddable viewport: fly around the reconstruction, capture camera poses.
+
+    Kept as a plain QFrame so it can live inside the main window's stack.
+    QWebEngineView needs a native window handle to get a GL surface, and the
+    reparenting a top-level QMainWindow wrapper introduced was enough to leave
+    the renderer canvas at 0x0. ``ViewportWindow`` below wraps this panel for
+    the standalone tools that still want their own window.
+    """
 
     log = Signal(str)
 
@@ -272,20 +279,17 @@ class ViewportWindow(QMainWindow):
         translate: Callable[[str], str] | None = None,
     ) -> None:
         super().__init__(parent=parent)
-        self.setWindowTitle("VaultWares 3D Viewport")
         self.setObjectName("Viewport")
-        
+
         base_translate = translate or (lambda key: key)
         self._t = lambda key: (
             value if (value := base_translate(key)) != key else _DEFAULT_STRINGS.get(key, key)
         )
         self._job_dir: Path | None = None
+        # (path_key, SceneBounds) — see _get_bounds_cached.
         self._bounds_cache: tuple | None = None
 
-        # We need a central widget since this is now a QMainWindow
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
@@ -305,7 +309,7 @@ class ViewportWindow(QMainWindow):
         # toolbar buttons.
         self.status_label = QLabel(self._t("viewport_no_scene"), self)
         self.status_label.setWordWrap(True)
-        self.status_label.setStyleSheet("color: palette(mid); padding: 2px 0;")
+        self.status_label.setStyleSheet("color: rgba(237, 230, 255, 0.72); padding: 2px 0;")
         layout.addWidget(self.status_label)
 
         if not WEBENGINE_AVAILABLE:
@@ -347,7 +351,7 @@ class ViewportWindow(QMainWindow):
             line = QFrame(self)
             line.setFrameShape(QFrame.Shape.HLine)
             line.setFrameShadow(QFrame.Shadow.Plain)
-            line.setStyleSheet("color: palette(mid);")
+            line.setStyleSheet("color: rgba(255, 255, 255, 0.06);")
             line.setMaximumWidth(230)
             return line
 
@@ -393,7 +397,7 @@ class ViewportWindow(QMainWindow):
         # ── Section 3: Captures (hand-authored camera list) ──────────────────
         panel.addWidget(_section_header("viewport_section_captures"))
         self.cameras_label = QLabel(self._t("viewport_cameras"), self)
-        self.cameras_label.setStyleSheet("color: palette(mid); padding: 0;")
+        self.cameras_label.setStyleSheet("color: rgba(237, 230, 255, 0.72); padding: 0;")
         panel.addWidget(self.cameras_label)
         self.camera_list = QListWidget(self)
         self.camera_list.setMaximumWidth(230)
@@ -425,6 +429,15 @@ class ViewportWindow(QMainWindow):
 
         self._page = _ViewportPage(self.web_view.page().profile(), self.web_view, self._set_status)
         self.web_view.setPage(self._page)
+
+        # Explicitly enable WebGL and accelerated canvas.
+        settings = self._page.settings()
+        settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.SpatialNavigationEnabled, True)
 
         self._server = ViewerServer()
 
@@ -708,3 +721,34 @@ class ViewportWindow(QMainWindow):
         store.write_text(json.dumps(cameras, indent=2), encoding="utf-8")
         self._refresh_cameras()
         self._set_status(self._t("viewport_captured").format(count=len(cameras)))
+
+
+class ViewportWindow(QMainWindow):
+    """Standalone window hosting a ViewportPanel.
+
+    Only used by ``tools/view_splat.py`` and ``tools/viewport_screenshot.py``;
+    the app embeds ViewportPanel directly (see gui/main_window.py). Callers
+    reach the viewport through ``.panel`` — no attribute forwarding, so that
+    assigning to e.g. ``panel._job_dir`` can't silently land on the wrapper.
+    """
+
+    def __init__(
+        self,
+        parent=None,
+        translate: Callable[[str], str] | None = None,
+    ) -> None:
+        super().__init__(parent=parent)
+        self.setWindowTitle("VaultWares 3D Viewport")
+
+        icon_path = (
+            Path(__file__).resolve().parent.parent
+            / "vaultwares-themes" / "assets" / "icons"
+            / "vaultwares-favicon-gold-filled-256.png"
+        )
+        if icon_path.exists():
+            from PySide6.QtGui import QIcon
+
+            self.setWindowIcon(QIcon(str(icon_path)))
+
+        self.panel = ViewportPanel(parent=self, translate=translate)
+        self.setCentralWidget(self.panel)
