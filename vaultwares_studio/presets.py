@@ -83,6 +83,11 @@ class QualityPreset:
     # a Gaussian head on top of the already-quadratic multi-view attention and
     # needs materially more. Lowered for the direct-3DGS presets.
     da3_max_sfm_frames: int = 80
+    # Fraction of gaussians kept per axis when sanitising the splat. 1.0 = no
+    # spatial filter, correct for trained splatfacto output. Feed-forward
+    # predictions need it: see splat_filter for why ~1% of DA3's gaussians
+    # stretched the bbox 416x and flipped the gravity estimate.
+    splat_keep_quantile: float = 1.0
 
     def train_args(self) -> list[str]:
         """splatfacto arguments shared by local and remote execution."""
@@ -275,6 +280,8 @@ PRESETS: dict[str, QualityPreset] = {
         # preview preset — 40 views is plenty — and it buys real headroom
         # against the quadratic attention on top of the Gaussian head.
         da3_max_sfm_frames=40,
+        # DA3's Gaussian head emits a degenerate background tail; keep 95%.
+        splat_keep_quantile=0.95,
         sfm_est_minutes=5,
         sfm_timeout_seconds=1_800,  # 30 min ceiling
         sfm_image_override="hf.co/spaces/{owner}/vw-studio-da3-gs",
@@ -343,6 +350,8 @@ PRESETS: dict[str, QualityPreset] = {
         # same frame cap. See da3-draft above for the OOM that established it.
         sfm_flavor=["a10g-small", "l4x1"],
         da3_max_sfm_frames=40,
+        # DA3's Gaussian head emits a degenerate background tail; keep 95%.
+        splat_keep_quantile=0.95,
         sfm_est_minutes=5,
         sfm_timeout_seconds=1_800,
         sfm_image_override="hf.co/spaces/{owner}/vw-studio-da3-gs",

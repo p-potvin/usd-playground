@@ -113,7 +113,11 @@ def compute_alignment(points: np.ndarray) -> AlignmentResult:
         up_candidate = -up_candidate
         skewness = -skewness
     rotation = _rotation_between_vectors(up_candidate, WORLD_UP)
-    angle_from_y = float(np.degrees(np.arccos(abs(np.dot(up_candidate, WORLD_UP)))))
+    # Clip before arccos: for an already-aligned cloud the dot product rounds to
+    # just past 1.0 and arccos returns nan, which then propagates into
+    # summary.json as a null tilt. Seen on the unfiltered da3-draft cloud.
+    alignment_dot = float(np.clip(abs(np.dot(up_candidate, WORLD_UP)), -1.0, 1.0))
+    angle_from_y = float(np.degrees(np.arccos(alignment_dot)))
     return AlignmentResult(
         rotation=rotation,
         up_before=up_candidate,

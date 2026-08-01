@@ -96,6 +96,7 @@ def run(ctx: "DigitalTwinStudioRunner", stage: "StageRecord") -> None:
                 ctx.recon_preview_ply_path,
                 ctx.recon_stage_path,
                 ctx.log,
+                keep_quantile=preset.splat_keep_quantile,
             )
             stage.metadata.update(info)
             degraded = False

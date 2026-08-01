@@ -232,9 +232,24 @@ def convert_splat_outputs(
     preview_ply_path: Path,
     usd_path: Path,
     log: Callable[[str], None] = lambda _msg: None,
+    keep_quantile: float = 1.0,
 ) -> dict:
-    """Standard post-reconstruction conversion: full PLY + preview + USD."""
+    """Standard post-reconstruction conversion: full PLY + preview + USD.
+
+    ``keep_quantile`` < 1.0 sanitises the splat first — see splat_filter. Only
+    feed-forward predictions (DA3's Gaussian head) need it; trained splatfacto
+    output is already clean and defaults to passing straight through.
+    """
+    from .splat_filter import sanitize_splat
+
     splat = read_gaussian_ply(ply_source)
+    splat, report = sanitize_splat(splat, keep_quantile=keep_quantile)
+    if report.dropped or report.opacity_clamped:
+        log(
+            f"Splat filter: dropped {report.dropped} of {report.count_before} gaussians, "
+            f"clamped {report.opacity_clamped} non-finite opacities, "
+            f"extent {report.radius_before:.1f} -> {report.radius_after:.1f}"
+        )
     write_gaussian_ply(splat, full_ply_path)
     preview_count = write_preview_ply(splat, preview_ply_path)
     usd_mode = splat_to_usd(splat, usd_path, source=str(ply_source.name))
@@ -242,4 +257,9 @@ def convert_splat_outputs(
         f"Splat conversion: {splat.count} gaussians -> {full_ply_path.name}, "
         f"{preview_count} pts -> {preview_ply_path.name}, USD ({usd_mode})"
     )
-    return {"gaussians": splat.count, "preview_points": preview_count, "usd_mode": usd_mode}
+    return {
+        "gaussians": splat.count,
+        "preview_points": preview_count,
+        "usd_mode": usd_mode,
+        "filter": report.as_dict(),
+    }
