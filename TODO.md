@@ -77,6 +77,7 @@ Plan of record: `docs/plans/plan-v1-remote-first-20260609.md` (M0–M6). Legacy 
 - [ ] Clamp DA3's `opacity` (max comes back `+inf`) before trusting `da3-incremental` — sigmoid-safe when rendering, but `nan`-poisons any mean/sum incl. `gaussian_merge.py`'s quality scoring.
 - [ ] Percentile-clip outliers in `convert_splat_outputs` — 96% of DA3 gaussians sit within radius 1.58 but the bbox is ±600 (skewness 32.7 vs 1.07 trained), which breaks viewer auto-framing and skews the gravity estimate.
 - [ ] `da3-incremental` end-to-end: shares the now-fixed `--gs-only` path, but the ICP merge itself has never run.
+- [ ] **DA3-Streaming integration** — spec written: [docs/plans/plan-da3-streaming-20260801.md](docs/plans/plan-da3-streaming-20260801.md). Lifts the 80-frame cap on the *SfM* path (feeds splatfacto; does not replace `--gs-only`) and natively fixes seams between separate captures. Five phases, ~$0.75 cumulative through training. Key findings: `da3_streaming/` is **not** pip-installed so it must be vendored; needs faiss-gpu/numba/pypose plus local weight files incl. a separate SALAD checkpoint; and the config we sketched has three keys that don't exist upstream while the proposed 65-chunk @ 672×378 is ~1.44× the tokens of the largest benchmarked config and won't fit 24GB.
 
 ---
 
