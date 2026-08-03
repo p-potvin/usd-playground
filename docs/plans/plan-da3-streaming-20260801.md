@@ -1,4 +1,4 @@
-<!-- v1.1.2 -->
+<!-- v1.2.0 -->
 # DA3-Streaming Integration — Spec
 
 > **Fri, 1 Aug 2026** — Plan for replacing the 80-frame `--max-sfm-frames` cap
@@ -6,11 +6,12 @@
 > upstream source, not the README. Several things differ from the config we
 > sketched; those are called out explicitly under [Config](#config-corrected).
 >
-> **Updated Sun, 3 Aug 2026 — phase 1 is done.** DA3-Streaming has been run
-> end-to-end on the local RTX 3060 (12 GB): 60 frames, 3 chunks, aligned and
-> merged, valid poses and point cloud. Every blocker found along the way is
-> recorded in [Phase 1 findings](#phase-1-findings-measured-not-predicted).
-> Cost: **$0.00**.
+> **Updated Sun, 3 Aug 2026 — phases 1 and 2 are done, both free.** Streaming
+> runs end-to-end on the local RTX 3060, and the pose converter is written and
+> **validated against a known-good `da3-standard` run**. See
+> [Phase 1 findings](#phase-1-findings-measured-not-predicted) and
+> [Phase 2 findings](#phase-2-findings-pose-convention-validated).
+> Cost so far: **$0.00**.
 
 ---
 
@@ -132,17 +133,13 @@ frames.zip
 The output contract stays `processed_min.zip`, so **Job B / splatfacto needs no
 changes at all** — this drops in behind the existing split-job plumbing.
 
-### 5. Pose converter — watch the convention
+### 5. Pose converter ✅ built and validated
 
-The existing `da3_to_transforms()` takes DA3's `(N,3,4)` **w2c** extrinsics,
-inverts them, and applies an OpenCV→OpenGL axis flip. Streaming gives **C2W
-directly**, so the inversion must be skipped — but the OpenGL flip almost
-certainly still applies.
-
-> ⚠️ This is the single highest-risk piece. Getting a pose convention subtly
-> wrong produces a reconstruction that trains without error and looks wrong.
-> Validate by rendering the trajectory (`camera_poses.ply`) against a known-good
-> `da3-standard` run on the same footage **before** spending on training.
+`vaultwares_studio/streaming_convert.py`. The existing `da3_to_transforms()`
+takes DA3's `(N,3,4)` **w2c** extrinsics and inverts them; streaming already
+emits **C2W**, so this module does *not* invert, and applies the OpenCV→OpenGL
+flip. Both choices were the ones in question, and both are now confirmed
+empirically — see [Phase 2 findings](#phase-2-findings-pose-convention-validated).
 
 ---
 
@@ -223,10 +220,9 @@ Each phase ends somewhere useful, so we can stop if the value isn't there.
 **Phase 1 — does it run at all?** ✅ **DONE, $0.00** *(local RTX 3060, 2026-08-03)*
 Ran 60 frames end-to-end. All blockers found and recorded above. No GPU spend.
 
-**Phase 2 — are the poses right?** *(~$0.10)*
-Write the converter. Validate against the known-good `da3-standard` run on the
-same backyard footage: compare trajectory shape and scale. Catches the pose
-convention bug before it costs a training run.
+**Phase 2 — are the poses right?** ✅ **DONE, $0.00** *(local, 2026-08-03)*
+Converter written (`vaultwares_studio/streaming_convert.py`) and validated
+against the known-good run. Both conventions confirmed. See below.
 
 **Phase 3 — full 500 frames.** *(~$0.20)*
 All 500 through streaming, then `processed_min.zip`. Compare pose count and point
@@ -340,6 +336,61 @@ it means SOR almost certainly isn't either.
 
 ---
 
+## Phase 2 findings: pose convention validated
+
+`vaultwares_studio/streaming_convert.py` converts streaming's flat output into
+`transforms.json` + `sparse_pc.ply`. Validated by running streaming on **exactly
+the 80 frames** the known-good `da3-standard` run used, then Umeyama-aligning
+(similarity: scale + rotation + translation) the two trajectories.
+
+The OpenCV→OpenGL flip negates the Y and Z rotation columns but leaves the
+translation column untouched, which makes the two checks independent:
+**position** validates C2W-vs-W2C, **orientation** validates the flip.
+
+| Check | Correct | Counterfactual |
+|---|---|---|
+| Orientation (median) | **9.07°** | **178.91°** without the flip |
+| Position RMSE | **11.9%** of extent | **26.0%** wrongly inverting to W2C |
+
+The 178.91° is decisive: a near-perfect inversion, exactly what dropping the flip
+predicts. Both conventions are confirmed:
+
+- **Do not invert.** Streaming already emits camera-to-world.
+- **Do apply** `diag(1, -1, -1, 1)` on the right.
+
+Both failure modes are pinned by `tests/test_streaming_convert.py` (16 tests) and
+both were mutation-tested — reintroducing either makes the suite fail.
+
+### The residual error is tail drift, not a converter bug
+
+Orientation error against the reference, by position in the sequence:
+
+| Frames | Median | Max |
+|---|---|---|
+| 0–15 | 12.96° | 56.78° |
+| 16–31 | **5.11°** | 16.10° |
+| 32–47 | **6.61°** | 12.86° |
+| 48–63 | **5.22°** | 18.92° |
+| **64–79** | **36.42°** | 113.32° |
+
+The well-conditioned middle chunks agree to **5–7°** — two independent DA3
+configurations at different resolutions landing within a few degrees of each
+other. The error is concentrated in the final chunk: accumulated SIM3 drift with
+`loop_enable: False`.
+
+Two mitigating factors for real runs, and one warning:
+
+- These 80 frames are **sparsely sampled** (~1.6 s apart), which is adversarial
+  for a method that assumes sequential video with small baselines. Production
+  runs feed consecutive frames.
+- **Loop closure is designed for exactly this** and was disabled. This moves
+  phase 5 from optional to likely-required for long sequences.
+- ⚠️ Do not read the 11.9% / 9.07° as an accuracy figure. The reference is
+  another DA3 estimate, not ground truth. These numbers validate *conventions*;
+  they say nothing about absolute accuracy.
+
+---
+
 ## Open questions
 
 1. ~~Does `loop_enable: False` remove the faiss dependency?~~ **Answered: no**,
@@ -351,8 +402,11 @@ it means SOR almost certainly isn't either.
 3. **Scale is still arbitrary.** Streaming does not make depth metric. Real-world
    units need an external reference (known object size, GPS baseline, IMU) and
    are out of scope here.
-4. **Pose convention** remains unvalidated and is still the highest risk — see
-   phase 2. We now have real poses to test a converter against, for free.
+4. ~~Pose convention~~ **Validated** — see phase 2 findings.
+5. **Does loop closure fix the tail drift?** The last chunk degrades badly with
+   `loop_enable: False` on sparsely-sampled frames. Loop closure exists for
+   exactly this, which raises the priority of phase 5 from "nice to have" to
+   "probably required for long sequences".
 
 ---
 
@@ -361,7 +415,7 @@ it means SOR almost certainly isn't either.
 ```yaml
 plan: da3-streaming-integration
 date: 2026-08-01
-status: PHASE_1_COMPLETE
+status: PHASE_2_COMPLETE
 replaces: "da3_entrypoint --max-sfm-frames 80 cap on the SfM path"
 does_not_replace: "--gs-only / da3-draft (that path stays as-is)"
 feeds: splatfacto via unchanged processed_min.zip contract
@@ -390,6 +444,7 @@ vram_analysis:
   verdict: "will not fit 24GB; start from benchmarked 60/30 @ 504x378"
 
 starting_config: {chunk_size: 80, overlap: 40, loop_enable: false, align_lib: triton, resolution: 504x280, flavor: a10g-small}
-highest_risk: "pose convention in the converter — trains cleanly while being wrong"
-phases_cost_usd: {phase1: 0.10, phase2: 0.10, phase3: 0.20, phase4: 0.35}
+highest_risk: "RESOLVED — pose convention validated 2026-08-03; new top risk is end-of-sequence chunk drift without loop closure"
+phases_cost_usd: {phase1: 0.00, phase2: 0.00, phase3: 0.20, phase4: 0.35}
+phases_done: [1, 2]
 ```
