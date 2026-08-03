@@ -139,6 +139,17 @@ def run(ctx: "DigitalTwinStudioRunner", stage: "StageRecord") -> None:
 # DA3 direct 3DGS (single-job, no splatfacto training)
 # ---------------------------------------------------------------------------
 
+def _scheduling_timeout(ctx) -> float:
+    """Seconds a flavor candidate may sit in SCHEDULING before the next is tried.
+
+    120s suits an interactive run; unattended retries can afford to wait out a
+    busy GPU pool, and SCHEDULING is not billed. Read from manifest metadata so
+    every remote path honours the same override — the direct-GS path had it
+    first and the split path silently ignored it, which cost a wasted launch.
+    """
+    return float(ctx.manifest.metadata.get("flavor_scheduling_timeout_seconds", 120.0))
+
+
 def _resolve_da3_image(ctx, preset, prep) -> str:
     """Resolve the DA3 Space image URL, handling the case where the default
     worker_image is a placeholder (python:3.12)."""
@@ -201,12 +212,7 @@ def _run_da3_direct_gs(
                 if preset.sfm_timeout_seconds > 0
                 else int(max(1800, preset.sfm_est_minutes * 60 * 4))
             ),
-            # How long to let each flavor candidate sit in SCHEDULING before
-            # moving to the next. The 120s default suits an interactive run;
-            # an unattended retry can afford to wait much longer for capacity.
-            "flavor_scheduling_timeout_seconds": ctx.manifest.metadata.get(
-                "flavor_scheduling_timeout_seconds", 120.0
-            ),
+            "flavor_scheduling_timeout_seconds": _scheduling_timeout(ctx),
             "command": gs_command,
             "extra_repo_inputs": [],
         },
@@ -285,6 +291,7 @@ def _run_da3_incremental(
                 if preset.sfm_timeout_seconds > 0
                 else int(max(1800, preset.sfm_est_minutes * 60 * 4))
             ),
+            "flavor_scheduling_timeout_seconds": _scheduling_timeout(ctx),
             "command": gs_command,
             "extra_repo_inputs": extra_repo_inputs,
         },
@@ -412,6 +419,20 @@ def _run_split_remote(
     ]
     if preset.sfm_method == SfmMethod.DA3:
         sfm_command.extend(["--da3-model", preset.da3_model])
+        if preset.da3_streaming:
+            # Streaming poses every frame via overlapping chunks instead of
+            # subsampling to --max-sfm-frames. Same processed_min.zip contract,
+            # so the training leg below is untouched.
+            sfm_command.append("--stream-sfm")
+            sfm_command.extend([
+                "--stream-resolution", preset.da3_stream_resolution,
+                "--stream-chunk-size", str(preset.da3_stream_chunk_size),
+                "--stream-overlap", str(preset.da3_stream_overlap),
+            ])
+            if preset.da3_stream_loop_closure:
+                sfm_command.append("--stream-loop-closure")
+        else:
+            sfm_command.extend(["--max-sfm-frames", str(preset.da3_max_sfm_frames)])
     sfm_extra_inputs: list[str] = []
     if refine_from:
         base_prefix = f"jobs/{refine_from}/reconstruction/out"
@@ -438,6 +459,7 @@ def _run_split_remote(
             "flavor": preset.sfm_flavor,
             "est_minutes": preset.sfm_est_minutes,
             "timeout_seconds": sfm_timeout,
+            "flavor_scheduling_timeout_seconds": _scheduling_timeout(ctx),
             "command": sfm_command,
             "extra_repo_inputs": sfm_extra_inputs,
         },
@@ -495,6 +517,7 @@ def _run_split_remote(
             "flavor": preset.flavor,
             "est_minutes": preset.est_minutes,
             "timeout_seconds": int(max(1800, preset.est_minutes * 60 * 4)),
+            "flavor_scheduling_timeout_seconds": _scheduling_timeout(ctx),
             "command": train_command,
             "extra_repo_inputs": train_extra_inputs,
         },

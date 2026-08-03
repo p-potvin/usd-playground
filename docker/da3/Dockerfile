@@ -114,6 +114,65 @@ RUN python3 -m pip install --no-cache-dir --no-build-isolation \
 # Prove the extension actually imports before we ship the image.
 RUN python3 -c "import gsplat; print('[Dockerfile] gsplat OK:', gsplat.__version__)"
 
+# ---- DA3-Streaming (--stream-sfm) --------------------------------------------
+# `da3_streaming/` is NOT part of the pip package: DA3's pyproject declares
+# packages = ["src/depth_anything_3"], so the streaming tree at repo root is
+# never installed. Vendor it explicitly.
+#
+# --recurse-submodules is REQUIRED, not tidiness: loop_utils/salad is a git
+# submodule (serizba/salad) and a plain clone leaves it empty, which fails at
+# import because da3_streaming.py:34 imports LoopDetector at module scope.
+# mkdir first: /opt/vw is otherwise created implicitly by the COPY steps further
+# down, which run after this.
+RUN mkdir -p /opt/vw \
+    && git clone --depth 1 --recurse-submodules --shallow-submodules \
+        https://github.com/ByteDance-Seed/Depth-Anything-3.git /tmp/da3-src \
+    && cp -r /tmp/da3-src/da3_streaming /opt/vw/da3_streaming \
+    && rm -rf /tmp/da3-src \
+    && test -d /opt/vw/da3_streaming/loop_utils/salad/models \
+    && echo "[Dockerfile] da3_streaming vendored incl. salad submodule"
+
+# da3_streaming/requirements.txt declares 7 packages and is missing 7 more
+# (matplotlib rich scipy scikit-learn tqdm trimesh pyyaml) plus the transitive
+# ones depth_anything_3 needs under --no-deps. All found by running it locally
+# on 2026-08-03; see docs/plans/plan-da3-streaming-20260801.md.
+#
+# faiss: loop_enable:False does NOT avoid it — loop_detector is imported at
+# module scope. faiss-cpu satisfies the import and is far easier to install
+# than faiss-gpu; loop closure itself is deferred, so nothing calls it yet.
+# NOT --no-deps here: these are leaf packages that don't pull torch. e3nn is the
+# one that does, and it is installed --no-deps above.
+#
+# "numpy<2" is passed as an explicit constraint, not decoration: pandas,
+# scikit-learn and pycolmap will all happily pull numpy 2.x, which is ABI-
+# incompatible with torch 2.1.2 and breaks CUDA silently. Constraining the
+# resolver is cheaper than discovering it at runtime.
+RUN python3 -m pip install --no-cache-dir "numpy<2" \
+        faiss-cpu pandas prettytable numba pypose \
+        matplotlib rich scikit-learn tqdm trimesh pyyaml \
+        addict pycolmap
+
+# Fail the build if anything above moved torch or numpy. Two separate incidents
+# this week (xformers, then e3nn) silently swapped torch for a CPU build and
+# were only caught by a paid GPU job reporting cuda unavailable.
+RUN python3 -c "\
+import torch, numpy; \
+print('[Dockerfile] torch', torch.__version__, '| numpy', numpy.__version__); \
+assert torch.__version__.startswith('2.1.2'), 'torch was moved: ' + torch.__version__; \
+assert '+cu' in torch.__version__, 'torch lost its CUDA build: ' + torch.__version__; \
+assert numpy.__version__.startswith('1.'), 'numpy went 2.x: ' + numpy.__version__; \
+print('[Dockerfile] torch/numpy intact')"
+
+# Prove the whole streaming import chain resolves before shipping. This single
+# check covers every phase-1 blocker: the salad submodule, faiss being imported
+# unconditionally despite loop_enable, and the undeclared deps.
+RUN cd /opt/vw/da3_streaming && python3 -c "\
+import faiss, triton, numba, pypose, matplotlib, sklearn, trimesh, yaml, addict, pycolmap; \
+from loop_utils.loop_detector import LoopDetector; \
+from loop_utils.sim3utils import merge_ply_files; \
+from loop_utils.config_utils import load_config; \
+print('[Dockerfile] da3_streaming imports OK')"
+
 # Stage bootstrap + entrypoints.
 COPY vw_stage.py /opt/vw/vw_stage.py
 COPY da3_entrypoint.py /opt/vw/da3_entrypoint.py
@@ -122,6 +181,8 @@ COPY render_entrypoint.py /opt/vw/render_entrypoint.py
 # Gaussian merge utilities (used by --merge-splat incremental mode).
 COPY gaussian_merge.py /opt/vw/gaussian_merge.py
 COPY splat_io.py /opt/vw/splat_io.py
+# Pose/intrinsic converter for --stream-sfm.
+COPY streaming_convert.py /opt/vw/streaming_convert.py
 
 WORKDIR /workspace
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

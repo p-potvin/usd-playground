@@ -35,6 +35,11 @@ def main() -> int:
     parser.add_argument("--job", required=True, help="Local job id, e.g. local-run-20260713-022745")
     parser.add_argument("--preset", default="da3-standard")
     parser.add_argument("--da3-model", default="depth-anything/DA3-LARGE-1.1")
+    parser.add_argument(
+        "--scheduling-timeout", type=float, default=600.0,
+        help="Seconds each flavor candidate may sit in SCHEDULING before the next "
+             "is tried. SCHEDULING is not billed, so waiting out a busy pool is free.",
+    )
     args = parser.parse_args()
 
     preset = get_preset(args.preset)
@@ -95,6 +100,7 @@ def main() -> int:
             "timeout_seconds": int(max(1800, preset.est_minutes * 60 * 4)),
             "command": train_command,
             "extra_repo_inputs": train_extra_inputs,
+            "flavor_scheduling_timeout_seconds": args.scheduling_timeout,
         },
         inputs=[],
         expected_outputs=[splat_path, summary_path, bundle_model, bundle_processed],

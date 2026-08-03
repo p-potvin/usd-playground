@@ -458,6 +458,176 @@ def make_depth_bundle(processed: Path, output_path: Path) -> Path | None:
     return output_path
 
 
+STREAMING_DIR = Path("/opt/vw/da3_streaming")
+
+
+def run_stream_sfm(
+    args, image_paths: list[Path], work: Path, processed: Path,
+    out_dir: Path, timings: dict,
+) -> int:
+    """DA3-Streaming over every frame, chunked and SIM3-aligned.
+
+    Unlike --sfm-only, which subsamples to --max-sfm-frames because DA3's
+    multi-view attention is quadratic, streaming windows the sequence so all
+    frames get posed. Output contract is identical (transforms.json +
+    sparse_pc.ply), so the training leg is unchanged.
+    """
+    import yaml
+    from PIL import Image
+
+    sys.path.insert(0, "/opt/vw")
+    from streaming_convert import write_processed_bundle
+
+    if not STREAMING_DIR.is_dir():
+        return fail(out_dir, "missing_streaming", f"{STREAMING_DIR} not present in image")
+
+    try:
+        stream_w, stream_h = (int(v) for v in args.stream_resolution.lower().split("x"))
+    except ValueError:
+        return fail(out_dir, "bad_args",
+                    f"--stream-resolution must be WxH, got {args.stream_resolution!r}")
+    if stream_w % 14 or stream_h % 14:
+        return fail(out_dir, "bad_args",
+                    f"--stream-resolution {stream_w}x{stream_h} is not a multiple of 14 "
+                    "(DA3 patch size)")
+
+    with Image.open(image_paths[0]) as probe:
+        orig_w, orig_h = probe.size
+    log(f"Streaming {len(image_paths)} frames: {orig_w}x{orig_h} -> {stream_w}x{stream_h}")
+
+    resized = work / "stream_frames"
+    resized.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    for path in image_paths:
+        with Image.open(path) as img:
+            img.convert("RGB").resize((stream_w, stream_h), Image.LANCZOS).save(
+                resized / path.name, quality=95
+            )
+    timings["stream_resize_s"] = round(time.monotonic() - started, 1)
+
+    # Streaming loads weights from local paths rather than a HF model id.
+    weights = work / "weights"
+    weights.mkdir(parents=True, exist_ok=True)
+    from huggingface_hub import hf_hub_download
+
+    started = time.monotonic()
+    for filename in ("config.json", "model.safetensors"):
+        cached = hf_hub_download(args.da3_model, filename)
+        shutil.copyfile(cached, weights / filename)
+    timings["stream_weights_s"] = round(time.monotonic() - started, 1)
+    log(f"Weights staged in {weights}")
+
+    config = {
+        "Weights": {
+            "DA3": str(weights / "model.safetensors"),
+            "DA3_CONFIG": str(weights / "config.json"),
+            "SALAD": str(weights / "dino_salad.ckpt"),
+        },
+        "Model": {
+            "chunk_size": args.stream_chunk_size,
+            "overlap": args.stream_overlap,
+            "loop_chunk_size": 20,
+            "loop_enable": bool(args.stream_loop_closure),
+            "useDBoW": False,
+            "delete_temp_files": True,
+            # triton is present in this image via torch 2.1.2; it is the fastest
+            # of the four align backends.
+            "align_lib": "triton",
+            "align_method": "sim3",
+            "scale_compute_method": "auto",
+            "align_type": "dense",
+            "ref_view_strategy": "saddle_balanced",
+            "ref_view_strategy_loop": "saddle_balanced",
+            "depth_threshold": 15.0,
+            "save_depth_conf_result": False,  # we only need poses + point cloud
+            "save_debug_info": False,
+            "Sparse_Align": {"keypoint_select": "orb", "keypoint_num": 5000},
+            # tol and lambda_init below are STRINGS on purpose — streaming does
+            # eval() on both (sim3utils.py:1216+, sim3loop.py:227). That works
+            # for its own YAML because PyYAML follows YAML 1.1, where an
+            # exponent needs a dot: `1e-9` resolves to the *string* '1e-9'.
+            # Dumping a Python float here writes `1.0e-09`, which round-trips
+            # back as a real float, and eval(float) raises TypeError.
+            "IRLS": {"delta": 0.1, "max_iters": 5, "tol": "1e-9"},
+            "Pointcloud_Save": {"sample_ratio": 0.015, "conf_threshold_coef": 0.75},
+        },
+        "Loop": {
+            "SALAD": {
+                "image_size": [336, 336], "batch_size": 32,
+                "similarity_threshold": 0.85, "top_k": 5,
+                "use_nms": True, "nms_threshold": 25,
+            },
+            "SIM3_Optimizer": {
+                # String for the same eval() reason as IRLS.tol above.
+                "lang_version": "cpp", "max_iterations": 30, "lambda_init": "1e-6",
+            },
+        },
+    }
+    config_path = work / "stream_config.yaml"
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    stream_out = work / "stream_out"
+    started = time.monotonic()
+    result = run_da3_streaming(
+        [
+            sys.executable, "da3_streaming.py",
+            "--image_dir", str(resized),
+            "--config", str(config_path),
+            "--output_dir", str(stream_out),
+        ],
+        cwd=str(STREAMING_DIR),
+    )
+    timings["stream_inference_s"] = round(time.monotonic() - started, 1)
+    if result.returncode != 0:
+        return fail(out_dir, "streaming_failed",
+                    f"da3_streaming.py exit {result.returncode}")
+
+    # Streaming sorts its input directory, so sorted order is the contract.
+    names = [p.name for p in sorted(resized.glob("*"))]
+    try:
+        write_processed_bundle(
+            stream_out, names, processed,
+            stream_size=(stream_w, stream_h),
+            original_size=(orig_w, orig_h),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return fail(out_dir, "convert_failed", str(exc))
+
+    # splatfacto reads the FULL-RES originals; transforms.json intrinsics were
+    # scaled up to match. The downscaled copies exist only for streaming.
+    target_images = processed / "images"
+    target_images.mkdir(parents=True, exist_ok=True)
+    for path in image_paths:
+        shutil.copyfile(path, target_images / path.name)
+
+    log(f"Streaming posed {len(names)} frames (vs {args.max_sfm_frames} for --sfm-only)")
+    return 0
+
+
+def run_da3_streaming(cmd: list[str], cwd: str) -> subprocess.CompletedProcess:
+    """Run da3_streaming.py, echoing output as it arrives.
+
+    Named distinctly from the module-level ``run_streaming`` helper above: an
+    earlier revision called this one ``run_streaming`` too, silently shadowing
+    it and breaking every --train-only call site with a TypeError.
+
+    Deliberately not subprocess.run(capture_output=True): streaming takes many
+    minutes and buffering the whole thing means the HF job log shows nothing
+    until it finishes, so a hang is indistinguishable from slow progress.
+    """
+    log(f"$ (cd {cwd} && {' '.join(cmd)})")
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, env=env, text=True, bufsize=1,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        log(f"  {line.rstrip()}")
+    proc.wait()
+    return subprocess.CompletedProcess(cmd, proc.returncode, "", "")
+
+
 def make_processed_min(processed: Path, output_path: Path) -> None:
     """Bundle transforms.json + sparse_pc.ply into processed_min.zip."""
     with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -596,6 +766,22 @@ def main() -> int:  # noqa: PLR0911, PLR0915
         "--max-sfm-frames", type=int, default=80,
         help="Max frames passed to DA3 inference (subsampled evenly). Prevents OOM on 22GB L4.",
     )
+    parser.add_argument(
+        "--stream-sfm", action="store_true",
+        help="Run DA3-Streaming over ALL frames (chunked + SIM3-aligned) instead of "
+             "subsampling to --max-sfm-frames. Produces processed_min.zip like --sfm-only.",
+    )
+    parser.add_argument(
+        "--stream-resolution", default="504x280",
+        help="WxH to resize frames to before streaming. Must be multiples of 14 "
+             "(patch size). 504x280 is 1.80 aspect (~16:9) at 720 patches/frame.",
+    )
+    parser.add_argument("--stream-chunk-size", type=int, default=80)
+    parser.add_argument("--stream-overlap", type=int, default=40)
+    parser.add_argument(
+        "--stream-loop-closure", action="store_true",
+        help="Enable DINO-SALAD loop closure. Needs dino_salad.ckpt; off by default.",
+    )
     args = parser.parse_args()
 
     in_dir = Path(os.environ["VW_IN"])
@@ -634,6 +820,34 @@ def main() -> int:  # noqa: PLR0911, PLR0915
         return fail(out_dir, "bad_args", "--sfm-only and --train-only are mutually exclusive")
     if args.merge_splat and not args.gs_only:
         return fail(out_dir, "bad_args", "--merge-splat requires --gs-only")
+    if args.stream_sfm and (args.gs_only or args.train_only):
+        return fail(out_dir, "bad_args",
+                    "--stream-sfm is mutually exclusive with --gs-only and --train-only")
+
+    # ---- --stream-sfm: DA3-Streaming over ALL frames ----
+    if args.stream_sfm:
+        started = time.monotonic()
+        rc = run_stream_sfm(args, image_paths, work, processed, out_dir, timings)
+        if rc != 0:
+            return rc
+        timings["stream_total_s"] = round(time.monotonic() - started, 1)
+        make_processed_min(processed, out_dir / "processed_min.zip")
+        (out_dir / "summary.json").write_text(
+            json.dumps({
+                "frames": frame_count,
+                "frames_to_da3": frame_count,  # streaming poses every frame
+                "sfm_engine": "da3-streaming",
+                "da3_model": args.da3_model,
+                "stream_resolution": args.stream_resolution,
+                "stream_chunk_size": args.stream_chunk_size,
+                "stream_overlap": args.stream_overlap,
+                "loop_closure": bool(args.stream_loop_closure),
+                "timings": timings,
+            }, indent=2),
+            encoding="utf-8",
+        )
+        log("DA3-Streaming SfM complete")
+        return 0
 
     # ---- --gs-only: DA3 direct 3DGS, no splatfacto ----
     if args.gs_only:

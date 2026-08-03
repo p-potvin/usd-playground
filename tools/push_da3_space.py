@@ -33,7 +33,7 @@ WORKER_DIR = ROOT / "docker" / "worker"
 SHARED_ENTRYPOINTS = ("vw_stage.py", "da3_entrypoint.py", "recon_entrypoint.py", "render_entrypoint.py")
 # Library modules needed by da3_entrypoint.py's --merge-splat mode.
 # Copied from vaultwares_studio/ into the Docker image root.
-LIBRARY_MODULES = ("gaussian_merge.py", "splat_io.py")
+LIBRARY_MODULES = ("gaussian_merge.py", "splat_io.py", "streaming_convert.py")
 
 README_BY_SPACE = {
     "vw-studio-da3": """---

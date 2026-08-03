@@ -41,7 +41,10 @@ class QualityPreset:
     iterations: int
     downscale_factor: int
     gaussian_cap: int
-    flavor: str
+    # Single flavor, or a fallback list tried in order — same semantics as
+    # sfm_flavor. HF spot capacity for any one GPU class is unreliable enough
+    # that the training leg wants the option too.
+    flavor: str | list[str]
     est_minutes: float
     extra_train_args: tuple[str, ...] = field(default_factory=tuple)
     # Checkpoint cadence for ns-train --steps-per-save. Production default
@@ -88,6 +91,20 @@ class QualityPreset:
     # predictions need it: see splat_filter for why ~1% of DA3's gaussians
     # stretched the bbox 416x and flipped the gravity estimate.
     splat_keep_quantile: float = 1.0
+    # DA3-Streaming: pose EVERY frame via overlapping chunks + SIM3 alignment
+    # instead of subsampling to da3_max_sfm_frames. Output contract is
+    # unchanged (processed_min.zip), so the training leg is unaffected.
+    # See docs/plans/plan-da3-streaming-20260801.md.
+    da3_streaming: bool = False
+    # Frames are pre-resized to this before streaming (there is no resolution
+    # key in DA3-Streaming's config). Must be multiples of 14 — the patch size.
+    # 504x280 is 1.80, i.e. ~16:9, at 720 patches/frame; the upstream benchmark
+    # resolutions are KITTI-shaped and would squash 16:9 footage.
+    da3_stream_resolution: str = "504x280"
+    da3_stream_chunk_size: int = 80
+    da3_stream_overlap: int = 40
+    # Needs dino_salad.ckpt, which we don't fetch yet. Off until phase 5.
+    da3_stream_loop_closure: bool = False
 
     def train_args(self) -> list[str]:
         """splatfacto arguments shared by local and remote execution."""
@@ -112,15 +129,15 @@ class QualityPreset:
         """Combined cost estimate. For split presets this sums both jobs."""
         if self.split_jobs and self.sfm_est_minutes > 0:
             sfm = self.sfm_cost()
-            train = estimate_cost(self.flavor, self.est_minutes)
+            train = self.train_cost()
             return CostEstimate(
-                flavor=f"{_flavor_label(self.sfm_flavor)}+{self.flavor}",
+                flavor=f"{_flavor_label(self.sfm_flavor)}+{_flavor_label(self.flavor)}",
                 est_minutes=self.sfm_est_minutes + self.est_minutes,
                 rate_usd_per_hour=0.0,  # mixed flavors; use est_usd directly
                 est_usd=round(sfm.est_usd + train.est_usd, 2),
                 source=RATE_TABLE_SOURCE,
             )
-        return estimate_cost(self.flavor, self.est_minutes)
+        return self.train_cost()
 
     def sfm_cost(self) -> CostEstimate:
         # sfm_flavor may be a fallback list — quote against the priciest
@@ -132,7 +149,12 @@ class QualityPreset:
         )
 
     def train_cost(self) -> CostEstimate:
-        return estimate_cost(self.flavor, self.est_minutes)
+        # Quote the priciest candidate so the dialog never undercounts.
+        candidates = self.flavor if isinstance(self.flavor, list) else [self.flavor]
+        return max(
+            (estimate_cost(f, self.est_minutes) for f in candidates),
+            key=lambda e: e.est_usd,
+        )
 
 
 PRESETS: dict[str, QualityPreset] = {
@@ -307,6 +329,39 @@ PRESETS: dict[str, QualityPreset] = {
         sfm_est_minutes=10,
         sfm_timeout_seconds=3_600,
         sfm_image_override="hf.co/spaces/{owner}/vw-studio-da3",
+    ),
+    # da3-stream: da3-standard, but every frame gets posed instead of 80.
+    #
+    # da3-standard throws away 84% of the footage — it subsamples 500 extracted
+    # frames to 80 because DA3's multi-view attention is quadratic. Streaming
+    # windows the sequence (chunk 80 / overlap 40) and stitches the chunks with
+    # SIM3 alignment, so all 500 are posed. It also resolves seams between
+    # separate captures natively, which is what makes multi-video scenes viable.
+    #
+    # Runs on vw-studio-da3-gs, which is the only image with the streaming tree
+    # vendored. 24GB flavors: chunk 80 @ 504x280 is ~0.99x the token count of
+    # the largest benchmarked config (60 @ 504x378 at 21.2GB of 24GB).
+    "da3-stream": QualityPreset(
+        key="da3-stream",
+        label="DA3 Streaming (all frames posed, chunked SfM)",
+        iterations=15_000,
+        downscale_factor=1,
+        gaussian_cap=500_000,
+        flavor=["l4x1", "a10g-small"],
+        est_minutes=25,  # more posed frames => longer training than da3-standard
+        extra_train_args=("--pipeline.model.cull-alpha-thresh", "0.05"),
+        split_jobs=True,
+        sfm_method=SfmMethod.DA3,
+        da3_model="depth-anything/DA3-LARGE-1.1",
+        da3_direct_gs=False,
+        da3_streaming=True,
+        da3_stream_resolution="504x280",
+        da3_stream_chunk_size=80,
+        da3_stream_overlap=40,
+        sfm_flavor=["a10g-small", "l4x1"],
+        sfm_est_minutes=20,  # 500 frames chunked, vs ~1 min for 80 in one pass
+        sfm_timeout_seconds=5_400,
+        sfm_image_override="hf.co/spaces/{owner}/vw-studio-da3-gs",
     ),
     # da3-high: DA3-LARGE SfM + longer splatfacto training on a bigger GPU.
     "da3-high": QualityPreset(
