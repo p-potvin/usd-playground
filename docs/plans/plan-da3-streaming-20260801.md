@@ -6,12 +6,11 @@
 > upstream source, not the README. Several things differ from the config we
 > sketched; those are called out explicitly under [Config](#config-corrected).
 >
-> **Updated Sun, 3 Aug 2026 — phases 1 and 2 are done, both free.** Streaming
-> runs end-to-end on the local RTX 3060, and the pose converter is written and
-> **validated against a known-good `da3-standard` run**. See
-> [Phase 1 findings](#phase-1-findings-measured-not-predicted) and
-> [Phase 2 findings](#phase-2-findings-pose-convention-validated).
-> Cost so far: **$0.00**.
+> **Updated Sun, 3 Aug 2026 — phases 1–4 done.** `da3-stream` works end to end:
+> **500/500 frames posed** (vs 80 for `da3-standard`), trained, and rendering.
+> Phases 1–2 cost $0.00 on the local RTX 3060; phases 3–4 cost **~$0.38** on HF.
+> One result needs following up before this replaces `da3-standard` — see
+> [Phases 3 & 4 results](#phases-3--4-results).
 
 ---
 
@@ -190,7 +189,7 @@ Model:
   align_method: 'sim3'
   depth_threshold: 15.0   # upstream's own depth truncation
   Pointcloud_Save:
-    sample_ratio: 0.015   # 1.5% — check this is enough to seed splatfacto
+    sample_ratio: 0.015   # verified ample: gave 1.1M seed points on 500 frames
 ```
 
 Input frames pre-resized to **504×280** (36×20 patches) — aspect-correct for
@@ -224,14 +223,12 @@ Ran 60 frames end-to-end. All blockers found and recorded above. No GPU spend.
 Converter written (`vaultwares_studio/streaming_convert.py`) and validated
 against the known-good run. Both conventions confirmed. See below.
 
-**Phase 3 — full 500 frames.** *(~$0.20)*
-All 500 through streaming, then `processed_min.zip`. Compare pose count and point
-cloud coverage against the 80-frame baseline. **This is where the actual value
-gets proven** — if 500 posed frames don't beat 80, stop here.
+**Phase 3 — full 500 frames.** ✅ **DONE, ~$0.04** *(2026-08-03)*
+500/500 frames posed on `a10g-small` in 120.3 s of streaming inference
+(150.8 s total). 6.25x the baseline's 80.
 
-**Phase 4 — train on it.** *(~$0.35)*
-Feed Job B unchanged. Compare against the 1.84M-gaussian benchmark. Only worth
-running if phase 3 shows materially better coverage.
+**Phase 4 — train on it.** ✅ **DONE, ~$0.32** *(2026-08-03)*
+Job B unchanged, `l4x1`, 1316.8 s training + 44 s export. See results below.
 
 **Phase 5 — loop closure.** *(cost TBD)*
 Add `faiss-gpu` + SALAD weights, `loop_enable: True`. This is what makes
@@ -391,6 +388,67 @@ Two mitigating factors for real runs, and one warning:
 
 ---
 
+## Phases 3 & 4 results
+
+Streaming SfM and the training leg both completed. The contract held: Job B was
+**not modified at all** — it consumed `processed_min.zip` exactly as it does for
+`da3-standard`.
+
+| | `da3-standard` | `da3-stream` |
+|---|---|---|
+| Frames posed | 80 | **500** |
+| SfM time | ~60 s | 120.3 s |
+| SfM cost | ~$0.01 | ~$0.04 |
+| Seed points | 500,000 | **1,096,054** |
+| Training | 1372 s | 1317 s |
+| **Gaussians** | **1,839,412** | **956,304** |
+| Total cost | ~$0.36 | ~$0.36 |
+
+Open question 2 is answered: `sample_ratio: 0.015` is **more** than enough —
+it produced 1.1M seed points, over double the baseline's 500k.
+
+### The gaussian count went *down*, and that needs explaining
+
+Half the gaussians from 6.25x the views is counterintuitive. Two candidate
+explanations, and they have opposite implications:
+
+1. **Stronger multi-view constraint.** With 500 views a gaussian must be
+   consistent with far more observations, so speculative ones get culled. That
+   would mean *fewer but better-constrained* gaussians — a win.
+2. **Under-training.** 15,000 iterations across 500 views is **30 iterations per
+   view**, against **188** for the 80-view baseline. Splatfacto's densification
+   is gradient-driven, so a 6x smaller per-view budget plausibly means it simply
+   never got round to splitting.
+
+The render argues these are not mutually exclusive: architectural detail is
+clearly *sharper* than any previous run (the shed's turquoise door, wall texture
+and window opening all resolve with real edges), which fits (1) — but the count
+drop fits (2).
+
+**Do not treat this as settled.** The obvious next experiment is one training run
+at a matched per-view budget — ~90,000 iterations to give 500 views the same 188
+iters/view the baseline had — and compare. That is a single ~$1.50 job and would
+separate the two hypotheses cleanly. Until then, `da3-stream` keeping
+`iterations=15_000` is a placeholder, not a considered choice.
+
+### Cost of phases 3–4
+
+Seven jobs, four of which produced nothing:
+
+| Outcome | Jobs | Cost |
+|---|---|---|
+| Cancelled in SCHEDULING (never ran) | 3 | $0.00 |
+| Failed: `eval()` on a float | 1 | $0.02 |
+| Failed: `run_streaming` name collision | 1 | $0.00 |
+| **Streaming SfM (succeeded)** | 1 | ~$0.04 |
+| **Training (succeeded)** | 1 | ~$0.32 |
+| | | **~$0.38** |
+
+Cancelled-while-SCHEDULING jobs cost nothing, which is what makes the flavor
+fallback cheap to be aggressive with.
+
+---
+
 ## Open questions
 
 1. ~~Does `loop_enable: False` remove the faiss dependency?~~ **Answered: no**,
@@ -415,7 +473,7 @@ Two mitigating factors for real runs, and one warning:
 ```yaml
 plan: da3-streaming-integration
 date: 2026-08-01
-status: PHASE_2_COMPLETE
+status: PHASE_4_COMPLETE
 replaces: "da3_entrypoint --max-sfm-frames 80 cap on the SfM path"
 does_not_replace: "--gs-only / da3-draft (that path stays as-is)"
 feeds: splatfacto via unchanged processed_min.zip contract
@@ -445,6 +503,6 @@ vram_analysis:
 
 starting_config: {chunk_size: 80, overlap: 40, loop_enable: false, align_lib: triton, resolution: 504x280, flavor: a10g-small}
 highest_risk: "RESOLVED — pose convention validated 2026-08-03; new top risk is end-of-sequence chunk drift without loop closure"
-phases_cost_usd: {phase1: 0.00, phase2: 0.00, phase3: 0.20, phase4: 0.35}
-phases_done: [1, 2]
+phases_cost_usd: {phase1: 0.00, phase2: 0.00, phase3: 0.04, phase4: 0.32}
+phases_done: [1, 2, 3, 4]
 ```
