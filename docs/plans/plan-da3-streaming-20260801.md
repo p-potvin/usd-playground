@@ -5,6 +5,12 @@
 > with DA3-Streaming's sliding-window chunking. Written against the **actual**
 > upstream source, not the README. Several things differ from the config we
 > sketched; those are called out explicitly under [Config](#config-corrected).
+>
+> **Updated Sun, 3 Aug 2026 — phase 1 is done.** DA3-Streaming has been run
+> end-to-end on the local RTX 3060 (12 GB): 60 frames, 3 chunks, aligned and
+> merged, valid poses and point cloud. Every blocker found along the way is
+> recorded in [Phase 1 findings](#phase-1-findings-measured-not-predicted).
+> Cost: **$0.00**.
 
 ---
 
@@ -75,14 +81,16 @@ non-trivial in our image:
 
 | Package | Status | Note |
 |---|---|---|
-| `faiss-gpu` | ⚠️ **risk** | PyPI `faiss-gpu` is unmaintained/dicey; needs `faiss-gpu-cu11` or conda. Used for loop-closure retrieval |
-| `numba` | ⚠️ | JIT; the entrypoint has an explicit warm-up step. Adds startup latency |
-| `pypose` | ⚠️ | Lie-group ops for SIM3 optimisation; pulls its own torch constraints |
+| `faiss-gpu` | ✅ **deferrable** | Needed only for loop closure (phase 5). `faiss-cpu` satisfies the module-scope import for phases 1–4 — verified locally |
+| `numba` | ✅ | installed clean; JIT warm-up is opt-in via config |
+| `pypose` | ✅ | installed clean, no torch conflict |
 | `pandas`, `prettytable`, `einops`, `safetensors` | ✅ | trivial or already present |
 
-`faiss-gpu` is the one that can sink this. Mitigation: `loop_enable: False`
-disables loop closure entirely, which likely drops the faiss dependency. Worth
-trying that first to get a baseline working, then adding loop closure.
+**Plus 7 undeclared packages and ~11 transitive ones** — see
+[Phase 1 findings](#phase-1-findings-measured-not-predicted). Install every DA3
+dep with `--no-deps`: `e3nn` declares `torch>=2.2.0` and will silently upgrade
+torch 2.1.2+cu118 to 2.13.0+**cpu**, killing CUDA. That is benchmark-doc bug #2
+recurring; it bit again during phase 1.
 
 ### 3. Weights must be on local disk
 
@@ -178,8 +186,8 @@ quadratic in the worst case. Either way it does not fit in 24 GB.
 
 ```yaml
 Model:
-  chunk_size: 60          # benchmarked at 21.2GB / 24GB
-  overlap: 30             # upstream default ratio; do not tune until it works
+  chunk_size: 80          # 0.99x the benchmarked token count at 504x280
+  overlap: 40             # upstream's 50% ratio; do not tune until it works
   loop_enable: False      # phase 1: avoid faiss-gpu + SALAD weights
   align_lib: 'triton'     # triton 2.1.0 already present via torch 2.1.2
   align_method: 'sim3'
@@ -188,7 +196,8 @@ Model:
     sample_ratio: 0.015   # 1.5% — check this is enough to seed splatfacto
 ```
 
-Input frames pre-resized to **504×378** (multiples of 14: 36×27 patches).
+Input frames pre-resized to **504×280** (36×20 patches) — aspect-correct for
+16:9, and cheaper per frame than the KITTI-shaped benchmark resolution.
 
 Flavor: `a10g-small` (24 GB) to match the benchmark. If we want 672×378 later,
 move to `l40sx1` (48 GB) rather than squeezing.
@@ -211,10 +220,8 @@ O(n log n) on millions of points.
 
 Each phase ends somewhere useful, so we can stop if the value isn't there.
 
-**Phase 1 — does it run at all?** *(~$0.10)*
-Vendor the tree, add deps with `loop_enable: False`, add `--stream-sfm`, run 60
-frames at 504×378 on `a10g-small`. Success = `camera_poses.txt` +
-`combined_pcd.ply` exist and VRAM stays under 24 GB. No conversion, no training.
+**Phase 1 — does it run at all?** ✅ **DONE, $0.00** *(local RTX 3060, 2026-08-03)*
+Ran 60 frames end-to-end. All blockers found and recorded above. No GPU spend.
 
 **Phase 2 — are the poses right?** *(~$0.10)*
 Write the converter. Validate against the known-good `da3-standard` run on the
@@ -239,18 +246,113 @@ Cumulative through phase 4: **~$0.75**.
 
 ---
 
+## Phase 1 findings (measured, not predicted)
+
+Ran on the local RTX 3060, 60 frames @ 504×154, chunk 30 / overlap 15,
+`loop_enable: False`. It took **five attempts** to get a clean run; every failure
+is a real integration blocker that would otherwise have been found on paid GPU
+time.
+
+### Undeclared dependencies
+
+`da3_streaming/requirements.txt` lists 7 packages. It is missing **7 more**:
+
+```
+matplotlib  rich  scipy  scikit-learn  tqdm  trimesh  pyyaml
+```
+
+Plus everything `depth_anything_3` itself needs when installed `--no-deps`:
+`huggingface_hub`, `opencv-python`, `imageio`, `omegaconf`, `plyfile`, `addict`,
+`pycolmap`, `moviepy` + `proglog` + `imageio_ffmpeg` + `decorator`.
+
+### `loop_utils/salad` is a git submodule
+
+`.gitmodules` points it at `serizba/salad`. A plain clone (or `--depth 1` without
+`--recurse-submodules`) leaves the directory **empty** and the import fails.
+Vendoring must use:
+
+```bash
+git clone --recurse-submodules https://github.com/ByteDance-Seed/Depth-Anything-3.git
+```
+
+### Two config flags do not guard their imports
+
+This answers open question 1, and adds a second instance of the same pattern:
+
+| Config | Expectation | Reality |
+|---|---|---|
+| `loop_enable: False` | avoids faiss | ❌ `da3_streaming.py:34` imports `LoopDetector` at module scope, which does `import faiss` at module scope |
+| `align_lib: 'torch'` | avoids triton | ❌ `sim3utils.py:23` imports `alignment_triton` unconditionally, which does `import triton` at module scope |
+
+**Both must be importable regardless of config.** Consequences:
+
+- **faiss**: `faiss-cpu` satisfies the import and has Windows wheels. Since loop
+  closure is disabled we never call it, so `faiss-gpu` is *not* needed for
+  phases 1–4. This substantially de-risks the container: `faiss-gpu` was the
+  dependency most likely to sink this, and it turns out to be deferrable.
+- **triton**: the Linux container already has triton 2.1.0 via torch 2.1.2, so
+  **the container is unaffected**. Windows has no triton wheel, so local runs
+  need an import-only shim (`da3-streaming-run/shims/triton/`). Only `jit` and
+  `language.constexpr` are needed — 4 decorators and some annotations.
+
+`sim3solve` (C++ SIM3 optimiser) is genuinely optional: it prints
+`Sim3solve of C++ Version failed, Will using Python Version.` and continues.
+
+### Resolution: the benchmark numbers are KITTI-shaped
+
+The benchmark rows are 504×154 (3.27:1) and 504×378 (1.33:1). Our footage is
+1920×1080 (**1.778**). 504×154 matches KITTI's aspect — those numbers were chosen
+for KITTI, not 16:9 video. **504×378 would squash our footage.**
+
+At patch-14, aspect-correct options against the benchmark's token count
+(chunk 60 × 972 patches = 58,320 tokens @ 21.2 GB of 24 GB):
+
+| Config | Patches/frame | Aspect | Tokens | vs benchmark |
+|---|---|---|---|---|
+| 60 @ 504×378 *(benchmarked)* | 972 | 1.333 ❌ | 58,320 | 1.00× |
+| 60 @ 672×378 *(sketched)* | 1296 | 1.778 ✅ | 77,760 | **1.33× — won't fit** |
+| 60 @ 504×280 | 720 | 1.800 ✅ | 43,200 | 0.74× |
+| **80 @ 504×280** | 720 | 1.800 ✅ | 57,600 | **0.99×** |
+
+**504×280 is the recommendation** — 1.25% off 16:9, and cheaper than the
+benchmark. At chunk 80 it fits 33% more frames per window than the benchmarked
+config *at the same memory*, with correct geometry.
+
+### Streaming's output needs no aggressive filtering
+
+Merged point cloud from the smoke run vs the `da3-draft` direct-3DGS output:
+
+| | `da3-draft` | DA3-Streaming |
+|---|---|---|
+| radius p95 | 1.4 | 0.72 |
+| radius max | **581** | **1.04** |
+| max / p95 | **416×** | **1.44×** |
+
+`depth_threshold: 15.0` and `conf_threshold_coef: 0.75` already remove the tail.
+So `splat_filter`'s AABB mask is **not needed on this path** — a good result, and
+it means SOR almost certainly isn't either.
+
+### Output sanity
+
+60 frames → 60 poses + 60 intrinsic rows. All 4×4 matrices have bottom row
+`[0,0,0,1]` and rotations with `det = 1.0`. Trajectory is smooth (median step
+0.0175, max 0.0638 — no jumps). 55,897 coloured points, all finite.
+
+---
+
 ## Open questions
 
-1. **Does `loop_enable: False` actually remove the faiss dependency**, or is it
-   imported unconditionally at module load? Determines whether phase 1 is easy.
-2. **Is `sample_ratio: 0.015` enough** to seed splatfacto? 1.5% of a dense
-   multi-frame fusion may still be plenty, or may need raising.
-3. **Local runs.** The 30/15 @ 504×154 config peaks at 11.5 GB and would fit the
-   RTX 3060's 12 GB — genuinely useful for iterating on the converter without
-   spending anything, at throwaway resolution.
-4. **Scale is still arbitrary.** Streaming does not make depth metric. If we ever
-   want real-world units, that needs an external reference (known object size,
-   GPS baseline, IMU) and is out of scope here.
+1. ~~Does `loop_enable: False` remove the faiss dependency?~~ **Answered: no**,
+   but `faiss-cpu` satisfies it and `faiss-gpu` is deferrable to phase 5.
+2. **Is `sample_ratio: 0.015` enough** to seed splatfacto? 60 frames gave 55,897
+   points. Extrapolating to 500 frames is ~465k, which is comparable to the
+   ~500k `sparse_pc.ply` the current path produces — so probably fine, but worth
+   confirming at full scale.
+3. **Scale is still arbitrary.** Streaming does not make depth metric. Real-world
+   units need an external reference (known object size, GPS baseline, IMU) and
+   are out of scope here.
+4. **Pose convention** remains unvalidated and is still the highest risk — see
+   phase 2. We now have real poses to test a converter against, for free.
 
 ---
 
@@ -259,7 +361,7 @@ Cumulative through phase 4: **~$0.75**.
 ```yaml
 plan: da3-streaming-integration
 date: 2026-08-01
-status: SPEC
+status: PHASE_1_COMPLETE
 replaces: "da3_entrypoint --max-sfm-frames 80 cap on the SfM path"
 does_not_replace: "--gs-only / da3-draft (that path stays as-is)"
 feeds: splatfacto via unchanged processed_min.zip contract
@@ -287,7 +389,7 @@ vram_analysis:
   token_ratio_vs_benchmark: 1.44
   verdict: "will not fit 24GB; start from benchmarked 60/30 @ 504x378"
 
-starting_config: {chunk_size: 60, overlap: 30, loop_enable: false, align_lib: triton, resolution: 504x378, flavor: a10g-small}
+starting_config: {chunk_size: 80, overlap: 40, loop_enable: false, align_lib: triton, resolution: 504x280, flavor: a10g-small}
 highest_risk: "pose convention in the converter — trains cleanly while being wrong"
 phases_cost_usd: {phase1: 0.10, phase2: 0.10, phase3: 0.20, phase4: 0.35}
 ```
