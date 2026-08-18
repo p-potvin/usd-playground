@@ -212,14 +212,18 @@ def main() -> int:  # noqa: PLR0915
         # picking every N-th preserves scene coverage over the whole capture.
         # Preferred over take-first-N (which biases to the first fraction of
         # the walk) especially when the launcher sends us an unpruned 3000-set.
-        step = len(image_paths) / args.max_images
-        indices = [int(round(i * step)) for i in range(args.max_images)]
-        indices = sorted(set(min(idx, len(image_paths) - 1) for idx in indices))
+        if args.max_images == 1:
+            indices = [0]
+        else:
+            indices = [
+                int(round(i * (len(image_paths) - 1) / (args.max_images - 1)))
+                for i in range(args.max_images)
+            ]
         original_count = len(image_paths)
         image_paths = [image_paths[i] for i in indices]
         print(
             f"[mast3r] uniformly subsampled {len(image_paths)}/{original_count} "
-            f"frames (step ~{step:.1f})", flush=True,
+            "frames (including the first and last frames)", flush=True,
         )
     if not image_paths:
         return _fail(out_dir, "no_frames", "frames.zip contained no jpg/png files")
@@ -236,7 +240,7 @@ def main() -> int:  # noqa: PLR0915
         return _fail(out_dir, "import_failed",
                      f"MASt3R model imports failed: {type(exc).__name__}: {exc}")
 
-    device = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES", "0") != "" else "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cpu":
         return _fail(out_dir, "no_gpu",
                      "MASt3R requires a CUDA GPU. This job was scheduled on a CPU flavor.")
@@ -281,10 +285,11 @@ def main() -> int:  # noqa: PLR0915
     scene_graph = args.scene_graph
     sim_matrix = None
     RETRIEVAL_PTH = Path("/root/.cache/torch/hub/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth")
-    if scene_graph.startswith("retrieval") and not RETRIEVAL_PTH.exists():
+    CODEBOOK_PTH = Path("/root/.cache/torch/hub/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl")
+    if scene_graph.startswith("retrieval") and not (RETRIEVAL_PTH.exists() and CODEBOOK_PTH.exists()):
         window = args.retrieval if args.retrieval > 0 else args.swin_window
         scene_graph = f"swin-{window}"
-        print(f"[mast3r] retrieval weights not baked in, falling back to {scene_graph}", flush=True)
+        print(f"[mast3r] retrieval weights or codebook not baked in, falling back to {scene_graph}", flush=True)
 
     if scene_graph.startswith("retrieval"):
         try:
@@ -410,7 +415,7 @@ def main() -> int:  # noqa: PLR0915
     # from VW_IN/frames.zip itself), but including it here is idempotent-safe.
     started = time.monotonic()
     zip_path = out_dir / "processed_min.zip"
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as archive:
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.write(processed / "transforms.json", "transforms.json")
         archive.write(processed / "sparse_pc.ply", "sparse_pc.ply")
     timings["zip_s"] = round(time.monotonic() - started, 1)
