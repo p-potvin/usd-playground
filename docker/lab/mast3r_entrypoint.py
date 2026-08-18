@@ -136,11 +136,11 @@ def _write_sparse_pc_ply(out_path: Path, points, colors) -> None:
 
     points = np.asarray(points, dtype=np.float32).reshape(-1, 3)
     colors = np.asarray(colors, dtype=np.float32).reshape(-1, 3)
-    if colors.max() <= 1.5:
-        colors = (colors * 255.0).clip(0, 255)
-    colors = colors.astype(np.uint8)
     n = min(len(points), len(colors))
     points, colors = points[:n], colors[:n]
+    if n > 0 and colors.max() <= 1.5:
+        colors = (colors * 255.0).clip(0, 255)
+    colors = colors.astype(np.uint8)
 
     dtype = [
         ("x", "f4"), ("y", "f4"), ("z", "f4"),
