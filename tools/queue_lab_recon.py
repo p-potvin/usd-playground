@@ -74,6 +74,17 @@ def main() -> int:
             "Use after a crash that already produced frames + frames.zip."
         ),
     )
+    parser.add_argument(
+        "--sfm-engine",
+        choices=("colmap", "mast3r"),
+        default="colmap",
+        help=(
+            "Which SfM engine to invoke inside the lab image. 'colmap' -> "
+            "recon_entrypoint.py --sfm-only. 'mast3r' -> mast3r_entrypoint.py. "
+            "The lab image built from docker/lab/Dockerfile bundles MASt3R "
+            "only, so choose accordingly."
+        ),
+    )
     args = parser.parse_args()
 
     preset = get_preset(args.preset)
@@ -167,19 +178,40 @@ def main() -> int:
     remote_out.mkdir(parents=True, exist_ok=True)
     sfm_processed_out = remote_out / "sfm_processed_min.zip"
 
-    sfm_command = [
-        "python", "/opt/vw/recon_entrypoint.py",
-        "--sfm-only",
-        "--downscale", str(preset.downscale_factor),
-        "--keep-checkpoint",
-        # Lab matcher/extractor tunings: 5x fewer vocab candidates per query
-        # and a ~2x smaller SIFT pyramid. Cuts the dominant matcher cost on a
-        # 3000-frame set; tradeoff is fewer loop closures + more brittle SfM
-        # on low-texture scenes. queue_lab_recon.py is the only caller setting
-        # these, so prod recon_entrypoint runs keep the historical defaults.
-        "--vocab-tree-num-images", "10",
-        "--sift-max-image-size", "910",
-    ]
+    if args.sfm_engine == "mast3r":
+        # MASt3R-SfM path -- learned matcher, GPU-required. Emits nerfstudio
+        # transforms.json + sparse_pc.ply packaged as processed_min.zip that
+        # the prod worker's --train-only path consumes.
+        #
+        # --max-images 500: MASt3R inference is ~500ms-1s per pair on L4. At
+        # swin-5 that's frames*5 pairs; 3000 frames = ~15k pairs ~= 5h. Cap at
+        # 500 -> 2500 pairs -> ~30-45 min. The entrypoint uniformly subsamples
+        # in time so the 500 covers the whole capture, not just the first bit.
+        sfm_command = [
+            "python", "/opt/vw/mast3r_entrypoint.py",
+            "--sfm-only",
+            "--downscale", str(preset.downscale_factor),
+            "--keep-checkpoint",
+            "--max-images", "500",
+            "--swin-window", "5",
+            "--image-size", "512",
+        ]
+        print("[lab-queue] engine=mast3r cap=500 window=5 -- GPU flavor required for SfM stage")
+    else:
+        sfm_command = [
+            "python", "/opt/vw/recon_entrypoint.py",
+            "--sfm-only",
+            "--downscale", str(preset.downscale_factor),
+            "--keep-checkpoint",
+            # Lab matcher/extractor tunings: 5x fewer vocab candidates per query
+            # and a ~2x smaller SIFT pyramid. Cuts the dominant matcher cost on a
+            # 3000-frame set; tradeoff is fewer loop closures + more brittle SfM
+            # on low-texture scenes. queue_lab_recon.py is the only caller setting
+            # these, so prod recon_entrypoint runs keep the historical defaults.
+            "--vocab-tree-num-images", "10",
+            "--sift-max-image-size", "910",
+        ]
+        print("[lab-queue] engine=colmap")
 
     config = HfJobsConfig.load()
     hf_runner = HfJobsStageRunner(
