@@ -25,7 +25,12 @@ from vaultwares_studio.runners import get_hf_token  # noqa: E402
 
 LAB_DIR = ROOT / "docker" / "lab"
 WORKER_DIR = ROOT / "docker" / "worker"
+# Shared with prod worker (bootstrap + fallback COLMAP entrypoint).
 SHARED_ENTRYPOINTS = ("vw_stage.py", "recon_entrypoint.py", "render_entrypoint.py")
+# Lab-only files (currently just the MASt3R entrypoint). These live under
+# docker/lab/ and get uploaded to the lab Space alongside the shared worker
+# files. If we add more lab entrypoints (e.g. Fast3R), extend this tuple.
+LAB_ONLY_ENTRYPOINTS = ("mast3r_entrypoint.py",)
 
 README = """---
 title: VW Studio Recon Lab
@@ -85,6 +90,17 @@ def main() -> int:
         source = WORKER_DIR / name
         if not source.exists():
             print(f"Missing shared entrypoint: {source}", file=sys.stderr)
+            return 2
+        api.upload_file(
+            path_or_fileobj=str(source),
+            path_in_repo=name,
+            repo_id=repo_id,
+            repo_type="space",
+        )
+    for name in LAB_ONLY_ENTRYPOINTS:
+        source = LAB_DIR / name
+        if not source.exists():
+            print(f"Missing lab-only entrypoint: {source}", file=sys.stderr)
             return 2
         api.upload_file(
             path_or_fileobj=str(source),
