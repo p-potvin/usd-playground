@@ -34,6 +34,7 @@ from typing import Callable
 # Matches nerfstudio-style "(42.3%)" progress fragments in remote log lines.
 _PERCENT_RE = re.compile(r"\((\d{1,3}(?:\.\d+)?)%\)")
 
+from .. import telemetry
 from .base import (
     CostDeniedError,
     CostEstimate,
@@ -257,7 +258,50 @@ class HfJobsStageRunner(StageRunner):
 
     # -- StageRunner ---------------------------------------------------------
 
-    def run(self, ctx: StageContext) -> StageResult:  # noqa: PLR0915
+    def run(self, ctx: StageContext) -> StageResult:
+        """Record one model run around the job, then delegate.
+
+        Wrapping rather than inlining because _run has many exits -- cancel,
+        terminal failure, missing outputs, success -- and a context manager
+        covers all of them without threading a record through each branch.
+
+        StageCancelledError maps to `cancelled` on its own (the recorder reads
+        "cancel" in the class name), so a user abort does not land in the
+        failure rate. CostDeniedError is set explicitly: declining a price is a
+        decision, not a fault, so it is `rejected` -- the same shape as a
+        budget refusal in vault-inference.
+        """
+        with telemetry.job_run(
+            model=ctx.stage_key or "unknown-stage",
+            stage_key=ctx.stage_key,
+            studio_job_id=ctx.job_id,
+        ) as run:
+            try:
+                result = self._run(ctx)
+            except CostDeniedError as exc:
+                run.set(status="rejected", error_class="CostDenied", error_message=str(exc))
+                raise
+
+            meta = result.metadata or {}
+            duration_seconds = meta.get("duration_seconds")
+            run.set(
+                cost_usd=meta.get("actual_usd_estimate"),
+                flavor=meta.get("flavor"),
+                hf_job_id=meta.get("job_id"),
+                hf_job_url=meta.get("job_url"),
+                est_usd=meta.get("est_usd"),
+                rate_source=meta.get("rate_source"),
+                output_count=len(result.artifacts),
+            )
+            if duration_seconds:
+                # The runner's own clock covers the remote job; the recorder's
+                # wall clock would also include upload and download.
+                run.set(remote_seconds=duration_seconds)
+            if result.status != "complete":
+                run.set(status="error", error_class="StageIncomplete")
+            return result
+
+    def _run(self, ctx: StageContext) -> StageResult:  # noqa: PLR0915
         # ctx.params["flavor"] may be a single flavor string or a list of
         # candidates to try in order (e.g. ["t4-small", "a10g-small"]) — HF
         # Jobs has no server-side "any of these" request, so we submit each
